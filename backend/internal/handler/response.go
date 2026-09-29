@@ -2,6 +2,7 @@ package handler
 
 import (
 	"errors"
+	"fmt"
 	"log"
 	"net/http"
 	"strconv"
@@ -10,6 +11,7 @@ import (
 	"infinite-canvas/backend/internal/service"
 
 	"github.com/gin-gonic/gin"
+	"github.com/mattn/go-sqlite3"
 )
 
 const internalErrorMessage = "系统处理失败，请稍后重试"
@@ -118,5 +120,23 @@ func logHandlerError(c *gin.Context, status int, err error) {
 		}
 	}
 	// 普通访问日志会输出 Gin error；这里只记录错误类型，避免密钥或上游响应体进入日志。
-	log.Printf("handler request failed: method=%s route=%s status=%d error_type=%T", method, route, status, err)
+	log.Printf("handler request failed: method=%s route=%s status=%d error_type=%T error=%s", method, route, status, err, sanitizeHandlerError(err))
+}
+
+func sanitizeHandlerError(err error) string {
+	if err == nil {
+		return ""
+	}
+	var sqliteErr sqlite3.Error
+	if !errors.As(err, &sqliteErr) {
+		return ""
+	}
+	text := strings.TrimSpace(sqliteErr.Error())
+	if text == "" {
+		return ""
+	}
+	if len(text) > 300 {
+		return text[:300] + "..."
+	}
+	return fmt.Sprintf("sqlite_code=%d sqlite_extended_code=%d message=%s", sqliteErr.Code, sqliteErr.ExtendedCode, text)
 }

@@ -202,6 +202,12 @@ func (r *Repository) UserByAccount(account string) (*model.User, error) {
 	return &user, nil
 }
 
+func (r *Repository) UpdateUserLastLogin(userID string, now time.Time) error {
+	return r.db.Model(&model.User{}).
+		Where("id = ?", userID).
+		Updates(map[string]any{"last_login_at": now, "updated_at": now}).Error
+}
+
 func (r *Repository) UserByUsername(username string) (*model.User, error) {
 	var user model.User
 	if err := r.db.Where("lower(username) = lower(?)", username).First(&user).Error; err != nil {

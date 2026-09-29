@@ -261,11 +261,11 @@ func (s *Service) CompleteLinuxDOLogin(stateValue string, code string) (*LinuxDO
 		return nil, err
 	}
 	now := time.Now()
-	user.LastLoginAt = &now
-	user.UpdatedAt = now
-	if err := s.repo.Save(user); err != nil {
+	if err := s.repo.UpdateUserLastLogin(user.ID, now); err != nil {
 		return nil, err
 	}
+	user.LastLoginAt = &now
+	user.UpdatedAt = now
 	s.host.RecordActivity(user.ID, "login", 1)
 	session, err := s.createAuthSession(user)
 	if err != nil {

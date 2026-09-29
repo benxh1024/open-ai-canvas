@@ -124,7 +124,7 @@ async function submitAgentRequest(path: string, input: CreateAgentRunInput) {
     const body = JSON.parse(JSON.stringify(input)) as CreateAgentRunInput;
     for (let attempt = 0; ; attempt++) {
         try {
-            return await http.post<{ run: AgentRun }>(path, body, { timeout: 15_000 });
+            return await http.post<{ run: AgentRun }>(path, body, { timeout: 60_000 });
         } catch (cause) {
             const error = cause as { retryable?: boolean; retryAfterMs?: number };
             if (!error.retryable || attempt >= 2) throw cause;
