@@ -10,33 +10,34 @@ import (
 	"strings"
 	"time"
 
+	"infinite-canvas/backend/internal/database"
 	"infinite-canvas/backend/internal/model"
 
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 )
 
-var ErrDailyUploadLimitExceeded = errors.New("daily upload limit exceeded")
+var ErrDailyUploadLimitExceeded = errors.New("今日上传额度已用完，请明天再试")
 
-var ErrTaskProviderRecoveryConflict = errors.New("task provider recovery is already running")
+var ErrTaskProviderRecoveryConflict = errors.New("任务正在恢复中，请稍后查看")
 
-var ErrTaskProviderCancellationConflict = errors.New("task provider cancellation is already claimed")
+var ErrTaskProviderCancellationConflict = errors.New("任务正在取消中，请稍后查看")
 
-var ErrTaskStateConflict = errors.New("task state changed concurrently")
+var ErrTaskStateConflict = errors.New("任务状态已变化，请刷新后重试")
 
-var ErrTextReplayQuotaExceeded = errors.New("text replay quota exceeded")
+var ErrTextReplayQuotaExceeded = errors.New("文本回放额度已用完")
 
-var ErrTextReplayClosed = errors.New("text replay task is closed")
+var ErrTextReplayClosed = errors.New("该文本任务已结束")
 
-var ErrEmailVerificationCodeInvalid = errors.New("email verification code is no longer valid")
+var ErrEmailVerificationCodeInvalid = errors.New("邮箱验证码已失效，请重新获取")
 
-var ErrProjectAssetFolderNotEmpty = errors.New("project asset folder is not empty")
+var ErrProjectAssetFolderNotEmpty = errors.New("资产文件夹不为空，无法删除")
 
-var ErrProjectHasActiveTasks = errors.New("project has active tasks")
+var ErrProjectHasActiveTasks = errors.New("项目中还有进行中的任务，请等待完成后再操作")
 
-var ErrProjectUnitShotsChanged = errors.New("project unit shots changed")
+var ErrProjectUnitShotsChanged = errors.New("镜头已被修改，请刷新后重试")
 
-var ErrCanvasRevisionConflict = errors.New("canvas revision changed")
+var ErrCanvasRevisionConflict = errors.New("画布已被更新，请刷新后重试")
 
 type Repository struct {
 	db *gorm.DB
@@ -73,32 +74,7 @@ func (r *Repository) ReleaseTaskLease(id string, owner string) error {
 // NextPrefixedID 在数据库事务中递增序列，避免 UUID/父子字符串拼接导致的不可读和不可排序 ID。
 // prefix 只决定展示前缀，关联关系仍由独立外键维护。
 func (r *Repository) NextPrefixedID(prefix string) (string, error) {
-	return r.nextPrefixedID(r.db, prefix)
-}
-
-func (r *Repository) nextPrefixedID(db *gorm.DB, prefix string) (string, error) {
-	prefix = strings.ToUpper(strings.TrimSpace(prefix))
-	if prefix == "" || len(prefix) > 16 {
-		return "", errors.New("invalid id prefix")
-	}
-	sequence := "id:" + prefix
-	var item model.IDSequence
-	err := db.Transaction(func(tx *gorm.DB) error {
-		if err := tx.Clauses(clause.OnConflict{DoNothing: true}).Create(&model.IDSequence{Name: sequence, UpdatedAt: time.Now()}).Error; err != nil {
-			return err
-		}
-		if err := tx.Model(&model.IDSequence{}).Where("name = ?", sequence).Updates(map[string]any{
-			"value":      gorm.Expr("value + ?", 1),
-			"updated_at": time.Now(),
-		}).Error; err != nil {
-			return err
-		}
-		return tx.First(&item, "name = ?", sequence).Error
-	})
-	if err != nil {
-		return "", err
-	}
-	return fmt.Sprintf("%s_%06d", prefix, item.Value), nil
+	return database.AllocatePrefixedID(r.db, prefix)
 }
 
 func (r *Repository) UserStorageUsage(userID string) (UserStorageUsage, error) {
@@ -312,7 +288,7 @@ func (r *Repository) CreateUserWithEmailVerification(user *model.User, verificat
 			return result.Error
 		}
 		if result.RowsAffected != 1 {
-			return errors.New("email verification code is no longer valid")
+			return errors.New("邮箱验证码已失效，请重新获取")
 		}
 		return tx.Create(user).Error
 	})
@@ -841,6 +817,17 @@ func (r *Repository) SystemSetting(key string) (*model.SystemSetting, error) {
 	return &setting, nil
 }
 
+func (r *Repository) SystemSettingOptional(key string) (*model.SystemSetting, error) {
+	var setting model.SystemSetting
+	if err := r.db.Where("key = ?", key).Limit(1).Find(&setting).Error; err != nil {
+		return nil, err
+	}
+	if setting.Key == "" {
+		return nil, nil
+	}
+	return &setting, nil
+}
+
 func (r *Repository) SaveSystemSetting(setting *model.SystemSetting) error {
 	return r.db.Save(setting).Error
 }
@@ -1025,6 +1012,14 @@ func (r *Repository) CreateResource(resource *model.Resource) error {
 
 func (r *Repository) SaveResource(resource *model.Resource) error {
 	return r.db.Save(resource).Error
+}
+
+// UpdateResourceThumbnail only updates a still-ready row and cannot resurrect a deleted resource.
+func (r *Repository) UpdateResourceThumbnail(userID string, id string, values map[string]any) (bool, error) {
+	result := r.db.Model(&model.Resource{}).
+		Where("id = ? AND user_id = ? AND status = ?", id, userID, model.ResourceStatusReady).
+		Updates(values)
+	return result.RowsAffected == 1, result.Error
 }
 
 func (r *Repository) ResourceByUploadKey(userID string, uploadKey string) (*model.Resource, error) {

@@ -6,6 +6,7 @@ type (
 	PaymentOrderQuery                      = app.PaymentOrderQuery
 	PaymentReconciliationQuery             = app.PaymentReconciliationQuery
 	CloudAgentRequest                      = app.CloudAgentRequest
+	CloudAgentRunViewOptions               = app.CloudAgentRunViewOptions
 	CloudAgentMediaSettings                = app.CloudAgentMediaSettings
 	CloudAgentCapabilitySet                = app.CloudAgentCapabilitySet
 	AgentProfileRequest                    = app.AgentProfileRequest
@@ -271,6 +272,10 @@ type (
 	Service                                = app.Service
 	ShotRevisionInput                      = app.ShotRevisionInput
 	SkillCategory                          = app.SkillCategory
+	SkillLibraryCategory                   = app.SkillLibraryCategory
+	SkillLibraryCategoryList               = app.SkillLibraryCategoryList
+	SkillLibraryCategoryMutationRequest    = app.SkillLibraryCategoryMutationRequest
+	SkillLibraryCategoryAssignmentRequest  = app.SkillLibraryCategoryAssignmentRequest
 	SkillEffectiveUser                     = app.SkillEffectiveUser
 	SkillFileSearchResult                  = app.SkillFileSearchResult
 	SkillGitHubInstallRequest              = app.SkillGitHubInstallRequest

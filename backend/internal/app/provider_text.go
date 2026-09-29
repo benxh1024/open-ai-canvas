@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"math"
 	"net/http"
 	"sort"
@@ -179,7 +180,7 @@ func runDeclarativeAgentTask(ctx context.Context, input canvasGenerationInput, a
 			return parseAgentToolPayload(payload, wire)
 		}
 	}
-	body, err := executeProtocolRequest(ctx, input.Config, spec)
+	body, err := executeDeclarativeAgentWithGeminiCache(ctx, input, spec)
 	if err != nil {
 		return nil, err
 	}
@@ -208,6 +209,49 @@ func runDeclarativeAgentTask(ctx context.Context, input canvasGenerationInput, a
 		return nil, errors.New("声明式 Agent 接口没有返回内容")
 	}
 	return result, nil
+}
+
+// executeDeclarativeAgentWithGeminiCache keeps explicit Prompt Cache entirely
+// optional: cache creation, cleanup, and a single stale-cache rebuild can never
+// turn a valid uncached Agent request into a failed run.
+func executeDeclarativeAgentWithGeminiCache(ctx context.Context, input canvasGenerationInput, spec protocol.RequestSpec) ([]byte, error) {
+	baseSpec, err := cloneProtocolRequestSpec(spec)
+	if err != nil {
+		return nil, err
+	}
+	executeSpec := baseSpec
+	cacheUsed := false
+	if input.Config.InterfaceType == officialGeminiAgentInterface {
+		prepared, used, prepareErr := prepareOfficialGeminiAgentCache(ctx, input, baseSpec)
+		if prepareErr != nil {
+			log.Printf("gemini agent prompt cache unavailable: model=%s reason=%s", safeProviderModel(input.Config.Model), safeProviderLogError(prepareErr))
+		} else {
+			executeSpec, cacheUsed = prepared, used
+		}
+	}
+	body, err := executeProtocolRequest(ctx, input.Config, executeSpec)
+	if err == nil || input.Config.InterfaceType != officialGeminiAgentInterface || !cacheUsed || !geminiRequestUsesCachedContent(executeSpec) || !isGeminiCachedContentNotFound(err, stringValue(protocolBodyObject(executeSpec.Body)["cachedContent"])) {
+		return body, err
+	}
+
+	resourceName := ""
+	if body := protocolBodyObject(executeSpec.Body); body != nil {
+		resourceName, _ = body["cachedContent"].(string)
+	}
+	if invalidateErr := invalidateOfficialGeminiAgentCache(ctx, input, baseSpec, resourceName); invalidateErr != nil {
+		// The local identity is still removed whenever possible. Do not replace a
+		// provider 404 with a cache bookkeeping error or skip the one rebuild.
+		log.Printf("gemini agent prompt cache invalidation failed: model=%s reason=%s", safeProviderModel(input.Config.Model), safeProviderLogError(invalidateErr))
+	}
+	rebuilt, _, prepareErr := prepareOfficialGeminiAgentCacheMode(ctx, input, baseSpec, true)
+	if prepareErr != nil {
+		log.Printf("gemini agent prompt cache rebuild unavailable: model=%s reason=%s", safeProviderModel(input.Config.Model), safeProviderLogError(prepareErr))
+		rebuilt = baseSpec
+	}
+	// The rebuilt request is intentionally executed only once. If it receives
+	// another CachedContent 404, the first stale-cache recovery already happened;
+	// preserve the provider error instead of recursively rebuilding forever.
+	return executeProtocolRequest(ctx, input.Config, rebuilt)
 }
 
 func claudeAgentBody(request map[string]interface{}) map[string]interface{} {
@@ -562,7 +606,7 @@ func (p *streamingAgentParser) consumeChatCompletionEvent(payload map[string]int
 		choice, _ := value.(map[string]interface{})
 		delta, _ := choice["delta"].(map[string]interface{})
 		p.appendText(streamContentText(delta["content"]))
-		p.appendReasoning(firstNonEmptyString(stringField(delta, "reasoning_content"), stringField(delta, "reasoning"), stringField(delta, "reasoning_text")))
+		p.appendReasoning(firstRawString(stringField(delta, "reasoning_content"), stringField(delta, "reasoning"), stringField(delta, "reasoning_text")))
 		for fallbackIndex, toolValue := range interfaceSlice(delta["tool_calls"]) {
 			tool, _ := toolValue.(map[string]interface{})
 			index := intField(tool, "index", fallbackIndex)
@@ -589,7 +633,7 @@ func (p *streamingAgentParser) consumeClaudeEvent(payload map[string]interface{}
 		case "text":
 			p.appendText(stringField(block, "text"))
 		case "thinking":
-			p.appendReasoning(firstNonEmptyString(stringField(block, "thinking"), stringField(block, "text")))
+			p.appendReasoning(firstRawString(stringField(block, "thinking"), stringField(block, "text")))
 		case "tool_use":
 			arguments := ""
 			if input := block["input"]; input != nil {
@@ -606,7 +650,7 @@ func (p *streamingAgentParser) consumeClaudeEvent(payload map[string]interface{}
 			p.appendText(stringField(delta, "text"))
 		}
 		if stringField(delta, "type") == "thinking_delta" {
-			p.appendReasoning(firstNonEmptyString(stringField(delta, "thinking"), stringField(delta, "text")))
+			p.appendReasoning(firstRawString(stringField(delta, "thinking"), stringField(delta, "text")))
 		}
 		if stringField(delta, "type") == "input_json_delta" {
 			p.toolCall(index).arguments += stringField(delta, "partial_json")
@@ -1359,4 +1403,15 @@ func extractChatCompletionText(payload map[string]interface{}) string {
 		}
 	}
 	return strings.Join(chunks, "")
+}
+
+// firstRawString 返回第一个非空字符串，并原样保留首尾空白。流式增量逐 token 到达，
+// 空格常常就在 token 开头（" user"）；用会 TrimSpace 的 firstNonEmptyString 会把词粘在一起。
+func firstRawString(values ...string) string {
+	for _, value := range values {
+		if value != "" {
+			return value
+		}
+	}
+	return ""
 }
