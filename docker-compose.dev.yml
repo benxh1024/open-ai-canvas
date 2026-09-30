@@ -10,6 +10,7 @@ services:
         GOPROXY: ${GOPROXY:-https://goproxy.cn,direct}
         ALPINE_MIRROR: ${ALPINE_MIRROR:-}
     working_dir: /workspace/backend
+    command: ["sh", "-c", "if [ ! -d /workspace/backend/agent-runtime/pi/node_modules/@earendil-works/pi-coding-agent ]; then cd /workspace/backend/agent-runtime/pi && npm ci --omit=dev --ignore-scripts; fi; cd /workspace/backend && exec air -c .air.toml"]
     user: "${LOCAL_UID:-1000}:${LOCAL_GID:-1000}"
     environment:
       HOME: /tmp

@@ -22,6 +22,8 @@ import (
 const requestLimit = 32 << 20
 const lineLimit = 4 << 20
 
+var piCodingAgentPackage = filepath.Join("node_modules", "@earendil-works", "pi-coding-agent", "package.json")
+
 type Bridge struct {
 	Model func(context.Context, map[string]json.RawMessage) (any, error)
 	Tool  func(context.Context, map[string]json.RawMessage) (any, error)
@@ -170,15 +172,31 @@ func RuntimeDir() (string, error) {
 	if _, source, _, ok := runtime.Caller(0); ok {
 		candidates = append(candidates, filepath.Clean(filepath.Join(filepath.Dir(source), "../../../agent-runtime/pi")))
 	}
+	var dependencyErr error
 	for _, candidate := range candidates {
 		if candidate == "" {
 			continue
 		}
 		if info, err := os.Stat(filepath.Join(candidate, "agent-runtime.mjs")); err == nil && !info.IsDir() {
-			return candidate, nil
+			if err := checkPiRuntimeDependency(candidate); err == nil {
+				return candidate, nil
+			} else if dependencyErr == nil {
+				dependencyErr = err
+			}
 		}
 	}
+	if dependencyErr != nil {
+		return "", dependencyErr
+	}
 	return "", errors.New("Agent runtime files are missing; set CANVAS_PI_RUNTIME_DIR")
+}
+
+func checkPiRuntimeDependency(runtimeDir string) error {
+	packagePath := filepath.Join(runtimeDir, piCodingAgentPackage)
+	if info, err := os.Stat(packagePath); err == nil && !info.IsDir() {
+		return nil
+	}
+	return fmt.Errorf("Pi Agent runtime dependency is missing in %s; run npm ci --omit=dev --ignore-scripts in backend/agent-runtime/pi", runtimeDir)
 }
 
 func firstNonEmpty(values ...string) string {

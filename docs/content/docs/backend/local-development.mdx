@@ -24,6 +24,7 @@ description: 在宿主机启动影策前后端开发服务
 - 使用 `.local/project-workbench-debug` 作为后端 SQLite 开发数据目录；
 - 创建 `.local/cache/go-build` 和 `.local/cache/go-mod` 缓存目录；
 - 首次启动时，如果 `web/node_modules` 不存在，执行 `bun install --frozen-lockfile`；
+- 需要 Node.js `>= 22.19`；首次启动时，如果 Pi Agent runtime 依赖不存在，执行 `npm ci --omit=dev --ignore-scripts`；
 - 打开两个 PowerShell 窗口，分别运行后端和前端；
 - 将前端 `/api` 请求代理到 `http://127.0.0.1:8080`。
 
@@ -44,6 +45,9 @@ Set-ExecutionPolicy -Scope Process Bypass
 
 ```bash
 mkdir -p .local/project-workbench-debug .local/cache/go-build .local/cache/go-mod
+cd backend/agent-runtime/pi
+npm ci --omit=dev --ignore-scripts
+cd ../../..
 cd backend
 CANVAS_BACKEND_ADDR=127.0.0.1:8080 \
 CANVAS_BACKEND_DATA_DIR=../.local/project-workbench-debug \

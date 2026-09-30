@@ -67,6 +67,11 @@ cd open-ai-canvas
 # 使用 Git 忽略的目录保存本地开发数据和缓存
 mkdir -p .local/project-workbench-debug .local/cache/go-build .local/cache/go-mod
 
+# Pi Agent runtime（需要 Node.js >= 22.19；仅首次或 package-lock.json 更新后执行）
+cd backend/agent-runtime/pi
+npm ci --omit=dev --ignore-scripts
+cd ../../..
+
 # 终端一：后端
 cd backend
 CANVAS_BACKEND_ADDR=127.0.0.1:8080 \

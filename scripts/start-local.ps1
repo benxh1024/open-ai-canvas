@@ -9,11 +9,12 @@ Import-CanvasWindowsProxy
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 $backendDir = Join-Path $repoRoot "backend"
 $webDir = Join-Path $repoRoot "web"
+$piRuntimeDir = Join-Path $backendDir "agent-runtime\pi"
 $dataDir = Join-Path $repoRoot ".local\project-workbench-debug"
 $goBuildCache = Join-Path $repoRoot ".local\cache\go-build"
 $goModuleCache = Join-Path $repoRoot ".local\cache\go-mod"
 
-foreach ($commandName in @("go", "bun")) {
+foreach ($commandName in @("go", "bun", "npm")) {
     if (-not (Get-Command $commandName -ErrorAction SilentlyContinue)) {
         throw "未找到 $commandName，请先安装项目要求的运行时。"
     }
@@ -31,6 +32,20 @@ if (-not (Test-Path -LiteralPath $viteBinary)) {
         & bun install --frozen-lockfile
         if ($LASTEXITCODE -ne 0) {
             throw "bun install 失败，无法启动前端。"
+        }
+    } finally {
+        Pop-Location
+    }
+}
+
+$piRuntimePackage = Join-Path $piRuntimeDir "node_modules/@earendil-works/pi-coding-agent"
+if (-not (Test-Path -LiteralPath $piRuntimePackage)) {
+    Write-Host "Pi Agent runtime 依赖不存在，正在执行 npm ci --omit=dev --ignore-scripts..." -ForegroundColor Yellow
+    Push-Location $piRuntimeDir
+    try {
+        & npm ci --omit=dev --ignore-scripts
+        if ($LASTEXITCODE -ne 0) {
+            throw "Pi Agent runtime 依赖安装失败，无法启动后端。"
         }
     } finally {
         Pop-Location
