@@ -268,11 +268,11 @@ func (s *Service) Login(req LoginRequest) (*AuthSessionResult, error) {
 		return nil, kernel.Unauthorized("用户名、邮箱或密码不正确")
 	}
 	now := time.Now()
-	if err := s.repo.UpdateUserLastLogin(user.ID, now); err != nil {
-		return nil, err
-	}
 	user.LastLoginAt = &now
 	user.UpdatedAt = now
+	if err := s.repo.Save(user); err != nil {
+		return nil, err
+	}
 	if err := s.host.EnsureSignupBonus(user.ID); err != nil {
 		return nil, err
 	}

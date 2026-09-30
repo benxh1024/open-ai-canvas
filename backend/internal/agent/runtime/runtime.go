@@ -15,14 +15,14 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
 const requestLimit = 32 << 20
 const lineLimit = 4 << 20
-
-var piCodingAgentPackage = filepath.Join("node_modules", "@earendil-works", "pi-coding-agent", "package.json")
 
 type Bridge struct {
 	Model func(context.Context, map[string]json.RawMessage) (any, error)
@@ -56,7 +56,21 @@ type ProcessRequest struct {
 	Model         map[string]any   `json:"model"`
 }
 
+// BridgeServer is the per-run callback endpoint. The Node runtime calls it for
+// model, tool, and event steps. Authorization is the bearer token; binding can
+// be loopback for the embedded process or the container network for yingce-agent.
+type BridgeServer struct {
+	URL   string
+	Token string
+	Close func()
+}
+
 func Run(ctx context.Context, request ProcessRequest, bridge Bridge) error {
+	release, err := acquireAgentProcess(ctx)
+	if err != nil {
+		return err
+	}
+	defer release()
 	if bridge.Model == nil || bridge.Tool == nil || bridge.Event == nil {
 		return errors.New("Agent bridge handlers are incomplete")
 	}
@@ -64,34 +78,27 @@ func Run(ctx context.Context, request ProcessRequest, bridge Bridge) error {
 	if err != nil {
 		return err
 	}
-	tokenBytes := make([]byte, 32)
-	if _, err := rand.Read(tokenBytes); err != nil {
-		return fmt.Errorf("create Agent bridge credential: %w", err)
-	}
-	token := hex.EncodeToString(tokenBytes)
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	server, err := StartBridge("127.0.0.1:0", "127.0.0.1", bridge)
 	if err != nil {
-		return fmt.Errorf("listen for Agent bridge: %w", err)
+		return err
 	}
-	defer listener.Close()
-	mux := http.NewServeMux()
-	mux.HandleFunc("POST /model", func(w http.ResponseWriter, r *http.Request) { BridgeCall(w, r, token, bridge.Model) })
-	mux.HandleFunc("POST /tool", func(w http.ResponseWriter, r *http.Request) { BridgeCall(w, r, token, bridge.Tool) })
-	mux.HandleFunc("POST /event", func(w http.ResponseWriter, r *http.Request) { BridgeCall(w, r, token, bridge.Event) })
-	server := &http.Server{Handler: mux, ReadHeaderTimeout: 3 * time.Second, ReadTimeout: 2 * time.Minute}
-	serverDone := make(chan error, 1)
-	go func() { serverDone <- server.Serve(listener) }()
-	defer func() { _ = server.Shutdown(context.Background()) }()
-
-	request.BridgeURL = "http://" + listener.Addr().String()
-	request.BridgeToken = token
+	defer server.Close()
+	request.BridgeURL = server.URL
+	request.BridgeToken = server.Token
 	payload, err := json.Marshal(request)
 	if err != nil {
 		return fmt.Errorf("encode Agent runtime request: %w", err)
 	}
-	cmd := exec.CommandContext(ctx, "node", filepath.Join(runtimeDir, "agent-runtime.mjs"))
+	cmd := exec.CommandContext(ctx, "node", "--max-old-space-size="+nodeMemoryMB(), filepath.Join(runtimeDir, "agent-runtime.mjs"))
 	cmd.Dir = runtimeDir
 	cmd.Stdin = strings.NewReader(string(payload))
+	// 环境变量白名单：只传 Node 运行所需的最少变量。
+	cmd.Env = []string{
+		"PATH=" + os.Getenv("PATH"),
+		"HOME=" + request.AgentDir,
+		"NODE_ENV=production",
+		"PI_OFFLINE=1",
+	}
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		return fmt.Errorf("open Agent runtime output: %w", err)
@@ -100,32 +107,10 @@ func Run(ctx context.Context, request ProcessRequest, bridge Bridge) error {
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("start Agent runtime: %w", err)
 	}
-	stdoutErr := make(chan error, 1)
-	go func() {
-		scanner := bufio.NewScanner(stdout)
-		scanner.Buffer(make([]byte, 64*1024), lineLimit)
-		for scanner.Scan() {
-			var event struct {
-				Event   string `json:"event"`
-				Message string `json:"message"`
-			}
-			if err := json.Unmarshal(scanner.Bytes(), &event); err != nil {
-				stdoutErr <- fmt.Errorf("decode Agent runtime event: %w", err)
-				return
-			}
-			if event.Event == "runtime_error" || event.Event == "bridge_error" {
-				stdoutErr <- errors.New(firstNonEmpty(event.Message, "Agent runtime failed"))
-				return
-			}
-		}
-		if err := scanner.Err(); err != nil {
-			stdoutErr <- fmt.Errorf("read Agent runtime output: %w", err)
-			return
-		}
-		stdoutErr <- nil
-	}()
+	// StdoutPipe 的读取必须在 Wait 之前结束。Wait 会关闭管道，提前调用会把
+	// 正常退出误报为 "file already closed"。
+	lineErr := ReadOutput(stdout)
 	waitErr := cmd.Wait()
-	lineErr := <-stdoutErr
 	if lineErr != nil {
 		return lineErr
 	}
@@ -138,11 +123,65 @@ func Run(ctx context.Context, request ProcessRequest, bridge Bridge) error {
 	return nil
 }
 
-func BridgeCall(w http.ResponseWriter, r *http.Request, expectedToken string, handler func(context.Context, map[string]json.RawMessage) (any, error)) {
-	if r.RemoteAddr == "" || !strings.HasPrefix(r.RemoteAddr, "127.0.0.1:") {
-		http.Error(w, `{"error":"loopback bridge only"}`, http.StatusForbidden)
-		return
+func StartBridge(listenAddr, advertiseHost string, bridge Bridge) (*BridgeServer, error) {
+	if bridge.Model == nil || bridge.Tool == nil || bridge.Event == nil {
+		return nil, errors.New("Agent bridge handlers are incomplete")
 	}
+	advertiseHost = strings.TrimSpace(advertiseHost)
+	if advertiseHost == "" || strings.ContainsAny(advertiseHost, `:/\\ `) {
+		return nil, errors.New("Agent bridge host must be a hostname or IP without a scheme or port")
+	}
+	tokenBytes := make([]byte, 32)
+	if _, err := rand.Read(tokenBytes); err != nil {
+		return nil, fmt.Errorf("create Agent bridge credential: %w", err)
+	}
+	token := hex.EncodeToString(tokenBytes)
+	listener, err := net.Listen("tcp", listenAddr)
+	if err != nil {
+		return nil, fmt.Errorf("listen for Agent bridge: %w", err)
+	}
+	tcpAddr, ok := listener.Addr().(*net.TCPAddr)
+	if !ok || tcpAddr.Port == 0 {
+		_ = listener.Close()
+		return nil, errors.New("Agent bridge did not receive a TCP port")
+	}
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /model", func(w http.ResponseWriter, r *http.Request) { BridgeCall(w, r, token, bridge.Model) })
+	mux.HandleFunc("POST /tool", func(w http.ResponseWriter, r *http.Request) { BridgeCall(w, r, token, bridge.Tool) })
+	mux.HandleFunc("POST /event", func(w http.ResponseWriter, r *http.Request) { BridgeCall(w, r, token, bridge.Event) })
+	server := &http.Server{Handler: mux, ReadHeaderTimeout: 3 * time.Second, ReadTimeout: 2 * time.Minute}
+	go func() { _ = server.Serve(listener) }()
+	return &BridgeServer{
+		URL:   fmt.Sprintf("http://%s:%d", advertiseHost, tcpAddr.Port),
+		Token: token,
+		Close: func() { _ = server.Shutdown(context.Background()) },
+	}, nil
+}
+
+func ReadOutput(stdout io.Reader) error {
+	scanner := bufio.NewScanner(stdout)
+	scanner.Buffer(make([]byte, 64*1024), lineLimit)
+	var lastError error
+	for scanner.Scan() {
+		var event struct {
+			Event   string `json:"event"`
+			Message string `json:"message"`
+		}
+		if err := json.Unmarshal(scanner.Bytes(), &event); err != nil {
+			lastError = fmt.Errorf("decode Agent runtime event: %w", err)
+			continue
+		}
+		if event.Event == "runtime_error" || event.Event == "bridge_error" {
+			lastError = errors.New(firstNonEmpty(event.Message, "Agent runtime failed"))
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		return fmt.Errorf("read Agent runtime output: %w", err)
+	}
+	return lastError
+}
+
+func BridgeCall(w http.ResponseWriter, r *http.Request, expectedToken string, handler func(context.Context, map[string]json.RawMessage) (any, error)) {
 	if r.Header.Get("Authorization") != "Bearer "+expectedToken {
 		http.Error(w, `{"error":"unauthorized bridge"}`, http.StatusUnauthorized)
 		return
@@ -172,31 +211,102 @@ func RuntimeDir() (string, error) {
 	if _, source, _, ok := runtime.Caller(0); ok {
 		candidates = append(candidates, filepath.Clean(filepath.Join(filepath.Dir(source), "../../../agent-runtime/pi")))
 	}
-	var dependencyErr error
 	for _, candidate := range candidates {
 		if candidate == "" {
 			continue
 		}
 		if info, err := os.Stat(filepath.Join(candidate, "agent-runtime.mjs")); err == nil && !info.IsDir() {
-			if err := checkPiRuntimeDependency(candidate); err == nil {
-				return candidate, nil
-			} else if dependencyErr == nil {
-				dependencyErr = err
-			}
+			return candidate, nil
 		}
-	}
-	if dependencyErr != nil {
-		return "", dependencyErr
 	}
 	return "", errors.New("Agent runtime files are missing; set CANVAS_PI_RUNTIME_DIR")
 }
 
-func checkPiRuntimeDependency(runtimeDir string) error {
-	packagePath := filepath.Join(runtimeDir, piCodingAgentPackage)
-	if info, err := os.Stat(packagePath); err == nil && !info.IsDir() {
-		return nil
+const (
+	defaultAgentProcessLimit = 30
+	maxAgentProcessLimit     = 64
+)
+
+type agentProcessGate struct {
+	mu     sync.Mutex
+	limit  int
+	active int
+	wake   chan struct{}
+}
+
+var processGate = newAgentProcessGate()
+
+func newAgentProcessGate() *agentProcessGate {
+	limit := defaultAgentProcessLimit
+	if raw := strings.TrimSpace(os.Getenv("CANVAS_AGENT_MAX_PROCESSES")); raw != "" {
+		if parsed, err := strconv.Atoi(raw); err == nil {
+			limit = clampAgentProcessLimit(parsed)
+		}
 	}
-	return fmt.Errorf("Pi Agent runtime dependency is missing in %s; run npm ci --omit=dev --ignore-scripts in backend/agent-runtime/pi", runtimeDir)
+	return &agentProcessGate{limit: limit, wake: make(chan struct{})}
+}
+
+func clampAgentProcessLimit(value int) int {
+	if value < 1 {
+		return defaultAgentProcessLimit
+	}
+	if value > maxAgentProcessLimit {
+		return maxAgentProcessLimit
+	}
+	return value
+}
+
+// SetProcessLimit changes how many embedded Agent processes may run at once.
+// Lowering the limit does not stop a process that has already started.
+func SetProcessLimit(value int) (active int, limit int) {
+	processGate.mu.Lock()
+	defer processGate.mu.Unlock()
+	processGate.limit = clampAgentProcessLimit(value)
+	close(processGate.wake)
+	processGate.wake = make(chan struct{})
+	return processGate.active, processGate.limit
+}
+
+func ProcessUsage() (active int, limit int) {
+	processGate.mu.Lock()
+	defer processGate.mu.Unlock()
+	return processGate.active, processGate.limit
+}
+
+func acquireAgentProcess(ctx context.Context) (func(), error) {
+	for {
+		processGate.mu.Lock()
+		if processGate.active < processGate.limit {
+			processGate.active++
+			processGate.mu.Unlock()
+			return releaseAgentProcess, nil
+		}
+		wake := processGate.wake
+		processGate.mu.Unlock()
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-wake:
+		}
+	}
+}
+
+func releaseAgentProcess() {
+	processGate.mu.Lock()
+	if processGate.active > 0 {
+		processGate.active--
+	}
+	close(processGate.wake)
+	processGate.wake = make(chan struct{})
+	processGate.mu.Unlock()
+}
+
+func nodeMemoryMB() string {
+	raw := strings.TrimSpace(os.Getenv("YINGCE_AGENT_NODE_MEMORY_MB"))
+	if parsed, err := strconv.Atoi(raw); err == nil && parsed >= 128 && parsed <= 8192 {
+		return strconv.Itoa(parsed)
+	}
+	return "512"
 }
 
 func firstNonEmpty(values ...string) string {
