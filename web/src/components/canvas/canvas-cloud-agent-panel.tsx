@@ -30,6 +30,7 @@ import {
     type AgentRun,
 } from "@/services/api/agent";
 import { agentApprovalMatchesSettings, agentApprovalTargetGenerating } from "@/lib/canvas/agent-media-approval";
+import { appendAgentPromptPrefill } from "@/lib/canvas/agent-prompt-prefill";
 import type { CanvasNodeData } from "@/types/canvas";
 import type { AgentMediaSettings } from "@/services/api/agent";
 import { addSkill, listAddedSkills, listSkillLibraryCategories, listSkills, listSkillPresets, type Skill, type SkillCategory, type SkillLibraryCategory, type SkillPreset } from "@/services/api/skills";
@@ -52,11 +53,13 @@ import { createAgentCanvasSync } from "@/services/agent-canvas-sync";
 import { buildSkillMentionReferences, resolveSkillMentions } from "@/services/skill-runtime";
 import { AGENT_SCENE_DEFS, AgentChatComposer, parseCloudAgentFormAnswer, AgentPlanBar, AgentQuestionBar, AgentSceneCapsules, type AgentSceneBucket, type CloudAgentChatMessage } from "./canvas-cloud-agent-chat-ui";
 import { CanvasAgentSkillLibraryModal } from "./canvas-agent-skill-library-modal";
+import { useSkillCuration, curationQuery } from "@/components/skills/skill-curation-browser";
 import { CanvasCloudAgentSettings, type AgentContextKey } from "./canvas-cloud-agent-settings";
 import { useAgentPanelLayout } from "./use-agent-panel-layout";
 import "./canvas-cloud-agent.css";
 import { appendAgentError, appendUniqueMessage, applyAgentEvent, positiveNumber, type ApprovalState } from "./canvas-cloud-agent-events";
 import { AgentContextRing, AgentConversation, AgentHeader, AgentHistory, AgentLauncher, ComposerControls } from "./canvas-cloud-agent-panel-parts";
+import { AgentConnectorsBar } from "./canvas-cloud-agent-connectors";
 
 type CloudAgentPanelProps = {
     canvasId: string;
@@ -65,7 +68,8 @@ type CloudAgentPanelProps = {
     selectedNodeIds: string[];
     references: CanvasResourceReference[];
     open: boolean;
-    prefillPrompt?: string;
+    /** 外部预填请求（如右键“发送到 Agent”）；id 变化即追加一次 text。 */
+    prefillRequest?: { id: number; text: string } | null;
     onOpen: () => void;
     onCollapse: () => void;
     onFocusNode?: (nodeId: string) => void;
@@ -75,7 +79,7 @@ type CloudAgentPanelProps = {
 };
 type AgentPanelView = "chat" | "history" | "settings";
 
-export function CanvasCloudAgentPanel({ canvasId, domainProjectId, nodeCount, selectedNodeIds, references, open, prefillPrompt, onOpen, onCollapse, onFocusNode, canvasNodes, runningNodeId }: CloudAgentPanelProps) {
+export function CanvasCloudAgentPanel({ canvasId, domainProjectId, nodeCount, selectedNodeIds, references, open, prefillRequest, onOpen, onCollapse, onFocusNode, canvasNodes, runningNodeId }: CloudAgentPanelProps) {
     const userId = useUserStore((state) => state.user?.id);
     const theme = canvasThemes[useActiveTheme()];
     const config = useEffectiveConfig();
@@ -88,7 +92,7 @@ export function CanvasCloudAgentPanel({ canvasId, domainProjectId, nodeCount, se
     const [connectionEpoch, setConnectionEpoch] = useState(0);
     const [messages, setMessages] = useState<CloudAgentChatMessage[]>([]);
     const [prompt, setPrompt] = useState("");
-    const lastPrefillPromptRef = useRef("");
+    const lastPrefillIdRef = useRef(0);
     const [reasoningMode, setReasoningMode] = useState<AgentReasoningMode>("off");
     const [profileView, setProfileView] = useState<AgentProfileView | null>(null);
     const [profileLoading, setProfileLoading] = useState(false);
@@ -107,6 +111,12 @@ export function CanvasCloudAgentPanel({ canvasId, domainProjectId, nodeCount, se
     const [libraryCategories, setLibraryCategories] = useState<SkillLibraryCategory[]>([]);
     const [skillTag, setSkillTag] = useState("all");
     const [skillsOpen, setSkillsOpen] = useState(false);
+    const curationState = useSkillCuration(skillsOpen);
+    const [platformCategory, setPlatformCategory] = useState("");
+    const skillBrowseKey = JSON.stringify([userId, skillTag, debouncedSkillSearch, platformCategory, curationState.curation?.revision, curationState.curation?.enabled]);
+    const skillBrowseKeyRef = useRef(skillBrowseKey);
+    skillBrowseKeyRef.current = skillBrowseKey;
+    useEffect(() => { if (curationState.curation?.enabled) setSkillTag("all"); }, [curationState.curation?.enabled]);
     const [busy, setBusy] = useState(false);
     const [approvalSubmitting, setApprovalSubmitting] = useState(false);
     const [exporting, setExporting] = useState(false);
@@ -129,6 +139,8 @@ export function CanvasCloudAgentPanel({ canvasId, domainProjectId, nodeCount, se
     const [scenePresets, setScenePresets] = useState<SkillPreset[]>([]);
     const [presetApplyingId, setPresetApplyingId] = useState("");
     const presetApplyingRef = useRef<string | null>(null);
+    // 连接器条默认展示，关闭后本次会话内不再显示。
+    const [connectorsVisible, setConnectorsVisible] = useState(true);
     const panelLayout = useAgentPanelLayout();
     const lastSeqRef = useRef(0);
     const canvasSyncRef = useRef<ReturnType<typeof createAgentCanvasSync> | null>(null);
@@ -305,12 +317,12 @@ export function CanvasCloudAgentPanel({ canvasId, domainProjectId, nodeCount, se
     const statusColor = status === "failed" ? "#e66b6b" : status === "rejected" || status === "cancelled" ? theme.node.muted : status === "waiting_approval" ? "#d6a24a" : status === "running" || status === "queued" ? "#69c29b" : theme.node.muted;
 
     useEffect(() => {
-        const value = prefillPrompt?.trim();
-        if (!value || value === lastPrefillPromptRef.current) return;
-        lastPrefillPromptRef.current = value;
-        setPrompt(value);
+        if (!prefillRequest || prefillRequest.id === lastPrefillIdRef.current) return;
+        lastPrefillIdRef.current = prefillRequest.id;
+        if (!prefillRequest.text.trim()) return;
+        setPrompt((current) => appendAgentPromptPrefill(current, prefillRequest.text));
         setView("chat");
-    }, [prefillPrompt]);
+    }, [prefillRequest]);
 
     useEffect(() => {
         if (!open || view !== "chat") setSkillsOpen(false);
@@ -382,6 +394,7 @@ export function CanvasCloudAgentPanel({ canvasId, domainProjectId, nodeCount, se
         setSkillsLoading(true);
         void listSkills({
             scope: "public",
+            ...curationQuery(curationState.curation, platformCategory),
             search: debouncedSkillSearch || undefined,
             tag: skillsOpen && skillTag !== "all" ? skillTag : undefined,
             pageSize: 20,
@@ -404,7 +417,7 @@ export function CanvasCloudAgentPanel({ canvasId, domainProjectId, nodeCount, se
         return () => {
             active = false;
         };
-    }, [view, skillsOpen, debouncedSkillSearch, skillTag]);
+    }, [view, skillsOpen, debouncedSkillSearch, skillTag, curationState.curation, platformCategory]);
 
     useEffect(() => {
         if (view !== "settings" && !skillsOpen) return;
@@ -422,25 +435,28 @@ export function CanvasCloudAgentPanel({ canvasId, domainProjectId, nodeCount, se
     }, [skillsOpen, userId, view]);
 
     const loadMoreSkills = async () => {
+        const requestKey = skillBrowseKeyRef.current;
         if (skillsLoading || skillPageRequestRef.current || !skillHasMore || skillSearch.trim() !== debouncedSkillSearch) return;
         skillPageRequestRef.current = true;
         setSkillsLoading(true);
         try {
             const result = await listSkills({
                 scope: "public",
+                ...curationQuery(curationState.curation, platformCategory),
                 search: debouncedSkillSearch || undefined,
                 tag: skillsOpen && skillTag !== "all" ? skillTag : undefined,
                 page: skillPage + 1,
                 pageSize: 20,
                 sort: "popular",
             });
+            if (requestKey !== skillBrowseKeyRef.current) return;
             setMarketSkills((current) => [...current, ...result.skills.filter((skill) => !current.some((item) => item.skillId === skill.skillId))]);
             setSkillCategories(result.categories);
             setSkillPage(result.page);
             setSkillHasMore(result.hasMore);
         } finally {
             skillPageRequestRef.current = false;
-            setSkillsLoading(false);
+            if (requestKey === skillBrowseKeyRef.current) setSkillsLoading(false);
         }
     };
 
@@ -593,6 +609,7 @@ export function CanvasCloudAgentPanel({ canvasId, domainProjectId, nodeCount, se
         submissionRequestRef.current = true;
         setBusy(true);
         let accepted = false;
+        let requestSent = false;
         try {
             const pending = pendingSubmission.current;
             // An ambiguous previous POST owns its body/key until reconciled.
@@ -663,6 +680,7 @@ export function CanvasCloudAgentPanel({ canvasId, domainProjectId, nodeCount, se
             if (currentScope.current !== scope) return;
             setPrompt("");
             setMessages(nextMessages);
+            requestSent = true;
             const result = submission.parentRunId ? await sendAgentMessage(submission.parentRunId, request) : await createAgentRun(request);
             accepted = true;
             if (currentScope.current === scope) {
@@ -686,7 +704,7 @@ export function CanvasCloudAgentPanel({ canvasId, domainProjectId, nodeCount, se
                     }
                 }
             }
-            setMessages((current) => appendAgentError(current, `submit-error-${activeConversationId}`, cause, agentSubmissionErrorTitle(cause, accepted)));
+            setMessages((current) => appendAgentError(current, `submit-error-${activeConversationId}`, cause, agentSubmissionErrorTitle(cause, accepted, requestSent)));
         } finally {
             submissionRequestRef.current = false;
             if (currentScope.current === scope) setBusy(false);
@@ -1033,6 +1051,7 @@ export function CanvasCloudAgentPanel({ canvasId, domainProjectId, nodeCount, se
                                         slashSkills={installedSkills}
                                         includeAssetLibrary={false}
                                         submitAccessory={<AgentContextRing view={presentAgentContextUsage(contextUsage)} />}
+                                        footer={connectorsVisible ? <AgentConnectorsBar onClose={() => setConnectorsVisible(false)} /> : null}
                                         left={
                                             <ComposerControls
                                                 config={config}
@@ -1054,6 +1073,9 @@ export function CanvasCloudAgentPanel({ canvasId, domainProjectId, nodeCount, se
                 ) : null}
             </AnimatePresence>
             <CanvasAgentSkillLibraryModal
+                curationState={curationState}
+                platformCategory={platformCategory}
+                onPlatformCategoryChange={(value) => { setPlatformCategory(value); setSkillTag("all"); }}
                 open={skillsOpen}
                 theme={theme}
                 installedSkills={installedSkills}
