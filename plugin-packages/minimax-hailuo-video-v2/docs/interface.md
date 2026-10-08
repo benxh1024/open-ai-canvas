@@ -25,10 +25,12 @@
 | `duration` | integer | 是 | `request.duration` | 4-15 秒。 |
 | `resolution` | string | 否 | `request.resolution` | 默认 `768P`；实际枚举按模型 profile。 |
 | `ratio` | string | 否 | `request.aspectRatio` | 首尾帧模式为 `adaptive`，其余默认 `16:9`。 |
-| `aigc_watermark` | boolean | 否 | `request.watermark` | 是否带 AIGC 水印。 |
-| `generate_audio` | boolean | 否 | `request.generateAudio` | 模型支持时生成音频。 |
+| `aigc_watermark` | boolean | 否 | `request.watermark` | 仅开启时发送。 |
+| `generate_audio` | boolean | 否 | `request.generateAudio` | 仅开启时发送。 |
 | `seed` | integer | 否 | `providerOptions.minimax-video.seed` | 随机种子。 |
 | `prompt_optimizer` | boolean | 否 | `providerOptions.minimax-video.prompt_optimizer` | 提示词优化开关。 |
+
+仅当模型能力声明支持且用户在生成配置中开启对应开关时，插件才发送 `aigc_watermark: true` 或 `generate_audio: true`；关闭或不支持时字段不会出现在请求中。
 
 ## 强校验
 
@@ -62,7 +64,7 @@
   "apiVersion": "yingce.plugin/v2",
   "id": "minimax-hailuo-video-v2",
   "name": "MiniMax Hailuo Video V2 / H3",
-  "version": "2.0.1",
+  "version": "2.0.3",
   "author": "MiniMax / 影策",
   "description": "MiniMax / Hailuo V2 视频生成协议，保留首帧、尾帧、参考图、视频和音频角色语义。",
   "documentation": "<当前插件的完整 documentation，由 README.md 与 docs/interface.md 拼接而成；为避免 JSON 递归，此处不重复展开正文。>",
@@ -171,13 +173,13 @@
             "name": "watermark",
             "type": "boolean",
             "mapping": "aigc_watermark",
-            "description": "AIGC 水印。"
+            "description": "AIGC 水印；仅开启时发送。"
           },
           {
             "name": "generateAudio",
             "type": "boolean",
             "mapping": "generate_audio",
-            "description": "模型支持时生成音频。"
+            "description": "生成音频；仅开启时发送。"
           },
           {
             "name": "seed",
@@ -572,10 +574,22 @@
               }
             },
             "aigc_watermark": {
-              "$ref": "request.watermark"
+              "$if": {
+                "condition": {
+                  "$ref": "request.watermark"
+                },
+                "then": true,
+                "else": null
+              }
             },
             "generate_audio": {
-              "$ref": "request.generateAudio"
+              "$if": {
+                "condition": {
+                  "$ref": "request.generateAudio"
+                },
+                "then": true,
+                "else": null
+              }
             },
             "seed": {
               "$omitEmpty": {

@@ -37,3 +37,34 @@ func TestMiniMaxVideoFailureMessages(t *testing.T) {
 		})
 	}
 }
+
+func TestMiniMaxVideoCreateIncludesEnabledOutputFieldsOnly(t *testing.T) {
+	adapter := officialPackageAdapter(t, "minimax-hailuo-video-v2.yingce-plugin", "minimax-video")
+	for _, tc := range []struct {
+		name    string
+		enabled bool
+	}{
+		{name: "disabled", enabled: false},
+		{name: "enabled", enabled: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			spec, err := adapter.BuildCreate(context.Background(), RequestContext{Request: GenerationRequest{
+				Model: "MiniMax-H3", Prompt: "A static gray circle.", Duration: 6, Resolution: "768P", AspectRatio: "16:9",
+				GenerateAudio: tc.enabled, Watermark: tc.enabled,
+			}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			body := manifestTestBody(t, spec)
+			for _, field := range []string{"aigc_watermark", "generate_audio"} {
+				value, exists := body[field]
+				if exists != tc.enabled {
+					t.Fatalf("%s exists = %v, want %v: %#v", field, exists, tc.enabled, body)
+				}
+				if tc.enabled && value != true {
+					t.Fatalf("%s = %#v, want true", field, value)
+				}
+			}
+		})
+	}
+}
