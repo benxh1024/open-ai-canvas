@@ -170,15 +170,16 @@ func (s *Service) buildFeaturesConfig(state *cloudAgentRuntime) map[string]any {
 	}
 }
 
-// buildPermissionsConfig 构建权限配置
+// buildPermissionsConfig 根据当前账号的画布归属生成运行时权限。
+// userID 是登录账号，canvasID 是画布 ID（不是所属项目 ID）；查询失败时拒绝访问。
 func (s *Service) buildPermissionsConfig(userID, canvasID string) map[string]any {
-	// 从数据库读取实际权限
+	// 与画布读写工具共用账号归属查询，不访问旧的 Canvas 扩展模型。
 	_, err := s.repo.CanvasProjectForUser(userID, canvasID)
 	if err != nil {
 		log.Printf("[Agent] failed to get canvas for permissions: %v", err)
 		// 返回最小权限集
 		return map[string]any{
-			"canReadCanvas":      true,
+			"canReadCanvas":      false,
 			"canWriteCanvas":     false,
 			"canDeleteNodes":     false,
 			"canCreateNodes":     false,
@@ -186,25 +187,20 @@ func (s *Service) buildPermissionsConfig(userID, canvasID string) map[string]any
 			"canDuplicateNodes":  false,
 			"canManageRelations": false,
 			"canInviteUsers":     false,
-			"canExportCanvas":    true,
+			"canExportCanvas":    false,
 			"maxTokenBudget":     200000,
 			"maxSteps":           50,
 		}
 	}
 
-	// CanvasProjectForUser scopes the document to its owner; all Agent canvas
-	// write paths use the same ownership check.
-	canWrite := true
-	canDelete := true
-
 	return map[string]any{
 		"canReadCanvas":      true,
-		"canWriteCanvas":     canWrite,
-		"canDeleteNodes":     canDelete,
-		"canCreateNodes":     canWrite,
-		"canMoveNodes":       canWrite,
-		"canDuplicateNodes":  canWrite,
-		"canManageRelations": canWrite,
+		"canWriteCanvas":     true,
+		"canDeleteNodes":     true,
+		"canCreateNodes":     true,
+		"canMoveNodes":       true,
+		"canDuplicateNodes":  true,
+		"canManageRelations": true,
 		"canInviteUsers":     true,
 		"canExportCanvas":    true,
 		"maxTokenBudget":     200000,
