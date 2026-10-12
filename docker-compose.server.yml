@@ -91,7 +91,7 @@ services:
       context: .
       dockerfile: Dockerfile
     ports:
-      - "127.0.0.1:5173:3000"
+      - "5173:3000"
     depends_on:
       backend:
         condition: service_healthy
