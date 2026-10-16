@@ -9,6 +9,7 @@ import (
 	"reflect"
 	"sort"
 	"strings"
+	"time"
 )
 
 var canvasOperationFields = []string{"title", "projectId", "chatSessions", "activeChatId", "starterMode", "appearance", "backgroundMode", "showImageInfo", "previsScenes", "timeline"}
@@ -203,6 +204,9 @@ func setCanvasPath(target map[string]any, path string, raw json.RawMessage) erro
 	return nil
 }
 
+// canvasNodeBookkeepingFields 是节点顶层的写入簿记字段，补丁按后写覆盖，不参与冲突基线校验。
+var canvasNodeBookkeepingFields = map[string]struct{}{"updatedAt": {}}
+
 func canvasOperationConflict(format string, args ...any) error {
 	return fmt.Errorf("%w: %s", ErrCanvasOperationConflict, fmt.Sprintf(format, args...))
 }
@@ -229,6 +233,46 @@ func canvasPathValue(target map[string]any, path string) (any, bool) {
 		current = value
 	}
 	return current, true
+}
+
+func hasTaskIdentityFence(node map[string]any, before map[string]json.RawMessage) bool {
+	raw, ok := before["metadata.taskId"]
+	if !ok {
+		return false
+	}
+	var taskID string
+	if json.Unmarshal(raw, &taskID) != nil || strings.TrimSpace(taskID) == "" {
+		return false
+	}
+	actual, exists := canvasPathValue(node, "metadata.taskId")
+	currentTaskID, ok := actual.(string)
+	return exists && ok && currentTaskID == taskID
+}
+
+func mergeTaskUpdatedAtMonotonically(node map[string]any, raw json.RawMessage) error {
+	var incoming string
+	if err := json.Unmarshal(raw, &incoming); err != nil || strings.TrimSpace(incoming) == "" {
+		return errors.New("任务更新时间无效")
+	}
+	incomingTime, err := time.Parse(time.RFC3339Nano, incoming)
+	if err != nil {
+		return errors.New("任务更新时间无效")
+	}
+	current, exists := canvasPathValue(node, "metadata.taskUpdatedAt")
+	if exists {
+		currentText, ok := current.(string)
+		if !ok {
+			return errors.New("当前任务更新时间无效")
+		}
+		currentTime, err := time.Parse(time.RFC3339Nano, currentText)
+		if err != nil {
+			return errors.New("当前任务更新时间无效")
+		}
+		if !incomingTime.After(currentTime) {
+			return nil
+		}
+	}
+	return setCanvasPath(node, "metadata.taskUpdatedAt", raw)
 }
 
 func canvasExpectedValueMatches(actual any, exists bool, expected json.RawMessage) bool {
@@ -289,6 +333,17 @@ func applyCanvasOperations(payload map[string]json.RawMessage, operations []Canv
 				if path == "id" {
 					return fmt.Errorf("节点 ID 不可修改")
 				}
+				// updatedAt 只是写入簿记，服务端（Agent/生成回写）会随时刷新它；
+				// 用它做基线会让任何被服务端触碰过的节点永久拒绝用户保存。
+				if _, bookkeeping := canvasNodeBookkeepingFields[path]; bookkeeping {
+					continue
+				}
+				// Task timestamps are produced by independent task observers. When the
+				// task identity is fenced by the same operation's before map, merge the
+				// timestamp monotonically instead of treating observer order as content.
+				if path == "metadata.taskUpdatedAt" && hasTaskIdentityFence(nodes[index], op.Before) {
+					continue
+				}
 				actual, exists := canvasPathValue(nodes[index], path)
 				if !canvasExpectedValueMatches(actual, exists, expected) {
 					return canvasOperationConflict("节点 %q 的字段 %q 已被其他写入修改", op.ID, path)
@@ -303,6 +358,12 @@ func applyCanvasOperations(payload map[string]json.RawMessage, operations []Canv
 			}
 			sort.Strings(keys)
 			for _, path := range keys {
+				if path == "metadata.taskUpdatedAt" && hasTaskIdentityFence(nodes[index], op.Before) {
+					if err := mergeTaskUpdatedAtMonotonically(nodes[index], op.Patch[path]); err != nil {
+						return err
+					}
+					continue
+				}
 				if err := setCanvasPath(nodes[index], path, op.Patch[path]); err != nil {
 					return err
 				}

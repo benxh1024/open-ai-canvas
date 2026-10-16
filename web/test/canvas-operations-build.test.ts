@@ -22,6 +22,25 @@ function canvas(patch: Partial<CanvasProject> = {}): CanvasProject {
 }
 
 describe("画布 operations 生成", () => {
+    test("生成任务时间戳更新携带taskId身份前置条件", () => {
+        const before = canvas({ nodes: [{ id: "video", type: "video", metadata: { taskId: "task-1", taskUpdatedAt: "2026-04-01T00:00:00Z" } }] as CanvasProject["nodes"] });
+        const after = canvas({ nodes: [{ id: "video", type: "video", metadata: { taskId: "task-1", taskUpdatedAt: "2026-04-01T00:00:01Z" } }] as CanvasProject["nodes"] });
+        expect(buildCanvasOperations(before, after)).toEqual([
+            {
+                type: "patch_node",
+                id: "video",
+                patch: { "metadata.taskUpdatedAt": "2026-04-01T00:00:01Z" },
+                before: { "metadata.taskUpdatedAt": "2026-04-01T00:00:00Z", "metadata.taskId": "task-1" },
+            },
+        ]);
+    });
+
+    test("没有taskId的普通metadata更新不增加任务前置条件", () => {
+        const before = canvas({ nodes: [{ id: "video", type: "video", metadata: { prompt: "old" } }] as CanvasProject["nodes"] });
+        const after = canvas({ nodes: [{ id: "video", type: "video", metadata: { prompt: "new" } }] as CanvasProject["nodes"] });
+        expect(buildCanvasOperations(before, after)).toEqual([{ type: "patch_node", id: "video", patch: { "metadata.prompt": "new" }, before: { "metadata.prompt": "old" } }]);
+    });
+
     test("节点可选字段的 undefined 在 JSON 请求中保留为 null 基线和删除值", () => {
         const node = { id: "node", metadata: { title: undefined } } as unknown as CanvasProject["nodes"][number];
         const changed = { ...node, metadata: { title: "新标题" } };
