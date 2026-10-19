@@ -29,6 +29,7 @@ export function agentErrorContent(text: string, title: string) {
 
 export function agentSubmissionErrorTitle(cause: unknown, accepted: boolean, requestSent = true) {
     if (accepted) return "运行已接收，但本地提交记录清理失败";
+    if (!requestSent) return "消息尚未发送，输入已保留";
     const status = cause instanceof ApiError ? cause.status : undefined;
     if (status && [400, 401, 403, 404, 422].includes(status)) return "请求已被服务端拒绝";
     if (!requestSent) return status ? "提交前检查未完成" : "提交前准备未完成，请检查网络后重试";
