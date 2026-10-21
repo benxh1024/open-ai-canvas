@@ -56,7 +56,7 @@ test("插话走独立接口，不碰轮次接口", async () => {
 test("画布助手的客户端标识兼容 HTTP 内网访问", async () => {
     const panel = await Bun.file(new URL("../src/components/canvas/canvas-cloud-agent-panel.tsx", import.meta.url)).text();
 
-    expect(panel).toContain('import { createClientId } from "@/lib/client-id";');
-    expect(panel).toContain("createClientId()");
+    expect(panel).toContain('import { createClientUUID } from "@/lib/client-id";');
+    expect(panel).toContain("createClientUUID()");
     expect(panel).not.toContain("crypto.randomUUID()");
 });
