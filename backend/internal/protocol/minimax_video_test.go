@@ -112,3 +112,27 @@ func TestMiniMaxVideoCreateIncludesEnabledOutputFieldsOnly(t *testing.T) {
 		})
 	}
 }
+
+func TestMiniMaxVideoAcceptsKeyframeWithReferenceImage(t *testing.T) {
+	adapter := officialPackageAdapter(t, "minimax-hailuo-video-v2.yingce-plugin", "minimax-video")
+	spec, err := adapter.BuildCreate(context.Background(), RequestContext{Request: GenerationRequest{
+		Model: "MiniMax-H3", Prompt: "保持角色一致", Duration: 6, AspectRatio: "16:9",
+		Images: []MediaReference{
+			{Role: "first_frame", URL: "https://cdn.example/first.png", Order: 1},
+			{Role: "reference_image", URL: "https://cdn.example/reference.png", Order: 2},
+		},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := manifestTestBody(t, spec)
+	content, _ := body["content"].([]any)
+	if len(content) != 3 {
+		t.Fatalf("content = %#v", content)
+	}
+	first, _ := content[1].(map[string]any)
+	reference, _ := content[2].(map[string]any)
+	if first["role"] != "first_frame" || reference["role"] != "reference_image" || body["ratio"] != "adaptive" {
+		t.Fatalf("combined keyframe request = %#v", body)
+	}
+}
