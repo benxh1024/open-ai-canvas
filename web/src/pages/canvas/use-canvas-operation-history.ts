@@ -3,6 +3,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, type Dispatch, type 
 import type { CanvasNodeGenerationMode } from "@/components/canvas/canvas-node-prompt-panel";
 import { applyCanvasOperations, summarizeCanvasOperations, type CanvasOperation, type CanvasSnapshot } from "@/lib/canvas/canvas-operation-contract";
 import { createGenerationRetryContext } from "@/lib/canvas/canvas-project-generation";
+import { sha256Hex } from "@/lib/digest";
 import { subscribeGenerationTasks, type GenerationTask } from "@/services/api/task-center";
 import { persistCanvasOperationContinuationEffect } from "@/services/canvas-generation-consumer";
 import { consumeGenerationTaskAgent } from "@/services/project-asset-sync";
@@ -203,9 +204,8 @@ export async function consumeCanvasGenerationContinuation(
 }
 
 async function canvasGenerationContinuationId(nodeId: string, context?: CanvasGenerationContext) {
-    const seed = new TextEncoder().encode(`canvas-operation-generation\0${context?.source || ""}\0${context?.conversationId || ""}\0${context?.messageId || ""}\0${nodeId}`);
-    const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", seed));
-    return `agent:${Array.from(digest, (byte) => byte.toString(16).padStart(2, "0")).join("")}`;
+    const digest = await sha256Hex(`canvas-operation-generation\0${context?.source || ""}\0${context?.conversationId || ""}\0${context?.messageId || ""}\0${nodeId}`);
+    return `agent:${digest}`;
 }
 
 export function useCanvasOperationHistory({

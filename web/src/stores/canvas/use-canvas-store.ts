@@ -5,6 +5,7 @@ import { nanoid } from "nanoid";
 import { sameCanvasContent } from "@/lib/canvas/canvas-content";
 import { canvasAppearanceForPreset, DEFAULT_CANVAS_BACKGROUND_MODE, NEW_CANVAS_BACKGROUND_MODE, normalizeCanvasAppearance, readCanvasAppearanceDefault, type CanvasAppearance } from "@/lib/canvas/canvas-appearance";
 import { parseCanvasStorageDocument, rebaseCanvasProjects, serializeCanvasStorageDocument, type CanvasStorageDocument } from "@/lib/canvas/canvas-storage-revision";
+import { withBrowserStorageLock } from "@/lib/browser-storage-lock";
 import { localForageStorageForScope } from "@/lib/localforage-storage";
 import { getActiveUserScope } from "@/lib/user-scope";
 import { DEFAULT_CANVAS_COLOR_THEME, type CanvasBackgroundMode } from "@/lib/canvas-theme";
@@ -221,10 +222,6 @@ type CanvasGenerationPersistenceAttempt = {
 };
 const pendingCanvasGenerationAttempts = new Map<string, Map<string, CanvasGenerationPersistenceAttempt>>();
 
-type AsyncCanvasStorageLock = {
-    request<T>(name: string, callback: () => Promise<T>): Promise<T>;
-};
-
 type CanvasStorageLockOptions = {
     requireCrossRealmLock?: boolean;
 };
@@ -233,13 +230,11 @@ const CANVAS_STORAGE_LOCK_PREFIX = "yingce:canvas-generation-storage-lock:";
 const canvasStorageTails = new Map<string, Promise<void>>();
 
 function runWithBrowserCanvasStorageLock<T>(scope: string, operation: () => Promise<T>, options: CanvasStorageLockOptions) {
-    const locks = typeof window !== "undefined" && typeof navigator !== "undefined" ? (navigator.locks as AsyncCanvasStorageLock | undefined) : undefined;
     const lockName = `${CANVAS_STORAGE_LOCK_PREFIX}${scope}`;
-    if (locks) return locks.request(lockName, operation);
-    if (options.requireCrossRealmLock && typeof window !== "undefined" && typeof document !== "undefined") {
-        throw new Error("当前浏览器不支持跨标签存储锁，已停止画布生成持久化");
-    }
-    return operation();
+    return withBrowserStorageLock(lockName, operation, {
+        requireCrossTabLock: options.requireCrossRealmLock,
+        unavailableMessage: "当前浏览器不支持跨标签存储锁，已停止画布生成持久化",
+    });
 }
 
 /**

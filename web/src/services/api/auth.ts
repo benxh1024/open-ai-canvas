@@ -10,6 +10,7 @@ import type { AccountFileStorageUsage } from "@/services/api/resources";
 
 let authSessionRequest: Promise<AuthSessionPayload> | null = null;
 let authSessionCache: { payload: AuthSessionPayload; expiresAt: number } | null = null;
+const AUTH_SESSION_TIMEOUT_MS = 8_000;
 
 export function invalidateAuthSessionCache() {
     authSessionCache = null;
@@ -425,7 +426,7 @@ export function getAuthSession() {
     if (authSessionCache && authSessionCache.expiresAt > now) return Promise.resolve(authSessionCache.payload);
     if (authSessionRequest) return authSessionRequest;
     authSessionRequest = http
-        .get<AuthSessionPayload>("/auth/session")
+        .get<AuthSessionPayload>("/auth/session", { timeout: AUTH_SESSION_TIMEOUT_MS })
         .then((payload) => {
             authSessionCache = { payload, expiresAt: Date.now() + 5_000 };
             return payload;

@@ -4,6 +4,35 @@ import { test } from "node:test";
 import { flushGenerationAssetStorageLocks, insertOrReturnGenerationAsset, withGenerationAssetStorageLock, type GenerationAssetRecord } from "../src/services/generation-asset-repository";
 import { generationArtifactStorageKey, loadOrStoreGenerationArtifact } from "../src/services/generation-artifact-sink";
 
+function memoryStorage() {
+    const values = new Map<string, string>();
+    const writes: string[] = [];
+    return {
+        storage: {
+            get length() {
+                return values.size;
+            },
+            clear() {
+                values.clear();
+            },
+            getItem(key: string) {
+                return values.get(key) ?? null;
+            },
+            key(index: number) {
+                return [...values.keys()][index] ?? null;
+            },
+            removeItem(key: string) {
+                values.delete(key);
+            },
+            setItem(key: string, value: string) {
+                writes.push(key);
+                values.set(key, value);
+            },
+        } as Storage,
+        writes,
+    };
+}
+
 test("generation asset insert waits for persistence and reload returns the same durable row", async () => {
     let assets: GenerationAssetRecord[] = [];
     let durableAssets: GenerationAssetRecord[] = [];
@@ -308,6 +337,46 @@ test("competing browser generation asset writes fail closed before entering stor
             );
         await Promise.all([assert.rejects(compete(), /跨标签存储锁/), assert.rejects(compete(), /跨标签存储锁/)]);
         assert.equal(entered, 0, "neither competing generation write may enter the critical section without a cross-tab lock");
+    } finally {
+        if (originalWindow === undefined) delete (globalThis as { window?: unknown }).window;
+        else Object.defineProperty(globalThis, "window", { configurable: true, value: originalWindow });
+        if (originalDocument === undefined) delete (globalThis as { document?: unknown }).document;
+        else Object.defineProperty(globalThis, "document", { configurable: true, value: originalDocument });
+        if (originalNavigator === undefined) delete (globalThis as { navigator?: unknown }).navigator;
+        else Object.defineProperty(globalThis, "navigator", { configurable: true, value: originalNavigator });
+    }
+});
+
+test("browser generation asset writes use a localStorage lease when Web Locks is unavailable", async () => {
+    const originalWindow = (globalThis as { window?: unknown }).window;
+    const originalDocument = (globalThis as { document?: unknown }).document;
+    const originalNavigator = (globalThis as { navigator?: unknown }).navigator;
+    const { storage, writes } = memoryStorage();
+    Object.defineProperty(globalThis, "window", { configurable: true, value: { localStorage: storage } });
+    Object.defineProperty(globalThis, "document", { configurable: true, value: {} });
+    Object.defineProperty(globalThis, "navigator", { configurable: true, value: {} });
+    const scope = "account-local-storage-lock";
+    const lockName = `yingce:generation-asset-storage-lock:${scope}`;
+    const remoteKey = `yingce:cross-tab-storage-lock:v1:${encodeURIComponent(lockName)}:remote-owner`;
+    storage.setItem(remoteKey, JSON.stringify({ owner: "remote-owner", ticket: 1, choosing: false, expiresAt: Date.now() + 60_000 }));
+    let entered = false;
+
+    try {
+        const pending = withGenerationAssetStorageLock(
+            scope,
+            async () => {
+                entered = true;
+            },
+            { requireCrossRealmLock: true },
+        );
+        await new Promise<void>((resolve) => setTimeout(resolve, 40));
+        assert.equal(entered, false, "a lower-priority lease from another tab must block this write");
+
+        storage.removeItem(remoteKey);
+        await pending;
+
+        assert.equal(entered, true);
+        assert.equal(writes.some((key) => key.startsWith("yingce:cross-tab-storage-lock:v1:")), true, "the fallback must publish a cross-tab lease");
     } finally {
         if (originalWindow === undefined) delete (globalThis as { window?: unknown }).window;
         else Object.defineProperty(globalThis, "window", { configurable: true, value: originalWindow });

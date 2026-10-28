@@ -4,6 +4,7 @@ import { configuredModelMatchesCapability, defaultConfig, normalizeModelOptionVa
 import { resolveImageUrl, uploadImage } from "@/services/image-storage";
 import { resolveMediaUrl, resolveVideoMediaUrl } from "@/services/file-storage";
 import { resourceIdFromStorageKey } from "@/services/api/resources";
+import { sha256Hex } from "@/lib/digest";
 import { NODE_DEFAULT_SIZE } from "@/constant/canvas";
 import { normalizeVideoDuration, normalizeVideoResolution } from "@/lib/video-generation-options";
 import { isSeedanceVideoConfig } from "@/lib/seedance-video";
@@ -139,10 +140,8 @@ export type GenerationRetryContext = {
 };
 
 export async function createGenerationRetryContext(retryOf: string, attemptGroupId = retryOf): Promise<GenerationRetryContext> {
-    const bytes = new TextEncoder().encode(`generation-retry\0${attemptGroupId}\0${retryOf}`);
-    const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", bytes));
-    const hex = Array.from(digest, (byte) => byte.toString(16).padStart(2, "0")).join("");
-    return { retryOf, attemptGroupId, clientOperationId: `retry:${hex}` };
+    const digest = await sha256Hex(`generation-retry\0${attemptGroupId}\0${retryOf}`);
+    return { retryOf, attemptGroupId, clientOperationId: `retry:${digest}` };
 }
 
 export function createGenerationBatchRetryContexts(taskIds: readonly string[], attemptGroupId: string) {

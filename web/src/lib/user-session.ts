@@ -33,34 +33,59 @@ export async function switchUserStorageScope(userId?: string | null) {
 }
 
 let sessionGeneration = 0;
+const USER_SCOPE_SWITCH_TIMEOUT_MS = 10_000;
 
 export async function applyUserSession(payload: AuthSessionPayload) {
     const generation = ++sessionGeneration;
     const previousUserId = useUserStore.getState().user?.id || "";
     const nextUserId = payload.user?.id || "";
     useUserStore.getState().setHydrated(false);
-    // Query key 不携带用户 ID；身份变化时必须取消并清空旧账号请求，避免跨账号复用内存数据。
-    if (previousUserId !== nextUserId) appQueryClient.clear();
-    await switchUserStorageScope(payload.user?.id);
-    // 切换存储 scope 时 user store 仍保留旧身份；此处只能先检查 generation。
-    if (!isCurrentGeneration(generation)) return;
-    withCanvasStorePersistenceSuppressed(() => withAssetStorePersistenceSuppressed(() => withUserScopedPersistenceSuppressed(() => {
-        resetUserScopedMemory();
-    })));
-    useUserStore.getState().setUser(payload.user);
-    useUserStore.getState().setRuntimeLimits(payload.runtimeLimits);
-    useUserStore.getState().setDrawingEngine(payload.drawingEngine);
-    useUserStore.getState().setFeatures(payload.features);
-    useUserStore.getState().setReferralAvailable(payload.referralAvailable);
-    installRemoteUserDataAutoSync();
     try {
-        // 缓存恢复和同步基线必须先于工作区开放，防止生成/编辑抢跑，或被初始化误记为已同步。
-        await hydrateUserSessionData(payload, generation);
+        // Query key 不携带用户 ID；身份变化时必须取消并清空旧账号请求，避免跨账号复用内存数据。
+        if (previousUserId !== nextUserId) appQueryClient.clear();
+        await withSessionTimeout(switchUserStorageScope(payload.user?.id), USER_SCOPE_SWITCH_TIMEOUT_MS, "切换本地工作区超时");
+        // 切换存储 scope 时 user store 仍保留旧身份；此处只能先检查 generation。
+        if (!isCurrentGeneration(generation)) return;
+        withCanvasStorePersistenceSuppressed(() => withAssetStorePersistenceSuppressed(() => withUserScopedPersistenceSuppressed(() => {
+            resetUserScopedMemory();
+        })));
+        useUserStore.getState().setUser(payload.user);
+        useUserStore.getState().setRuntimeLimits(payload.runtimeLimits);
+        useUserStore.getState().setDrawingEngine(payload.drawingEngine);
+        useUserStore.getState().setFeatures(payload.features);
+        useUserStore.getState().setReferralAvailable(payload.referralAvailable);
+        installRemoteUserDataAutoSync();
+        try {
+            // 缓存恢复和同步基线必须先于工作区开放，防止生成/编辑抢跑，或被初始化误记为已同步。
+            await hydrateUserSessionData(payload, generation);
+        } catch (error) {
+            if (isCurrentSession(generation, nextUserId)) console.warn("用户工作区后台初始化失败，基础页面仍可继续", error);
+        }
     } catch (error) {
-        if (isCurrentSession(generation, nextUserId)) console.warn("用户工作区后台初始化失败，基础页面仍可继续", error);
+        if (isCurrentGeneration(generation)) {
+            // 本地 scope 尚未完成切换时不能继续持有旧账号身份，否则页面可能把旧缓存当作新账号数据展示。
+            console.warn("用户工作区会话初始化失败，已回退到登录态", error);
+            useUserStore.getState().clearSession();
+        }
     } finally {
-        if (isCurrentSession(generation, nextUserId)) useUserStore.getState().setHydrated(true);
+        if (isCurrentGeneration(generation)) useUserStore.getState().setHydrated(true);
     }
+}
+
+function withSessionTimeout<T>(operation: Promise<T>, timeoutMs: number, message: string): Promise<T> {
+    return new Promise<T>((resolve, reject) => {
+        const timer = setTimeout(() => reject(new Error(message)), timeoutMs);
+        void operation.then(
+            (value) => {
+                clearTimeout(timer);
+                resolve(value);
+            },
+            (error) => {
+                clearTimeout(timer);
+                reject(error);
+            },
+        );
+    });
 }
 
 function resetUserScopedMemory() {
