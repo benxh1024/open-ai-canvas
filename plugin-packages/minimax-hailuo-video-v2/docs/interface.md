@@ -24,7 +24,7 @@
 | `audios` | media[] | 否 | audio content blocks | 参考音频或声音按 role 与 order 映射。 |
 | `duration` | integer | 是 | `request.duration` | 4-30 秒。 |
 | `resolution` | string | 否 | `request.resolution` | 默认 `768P`；实际枚举按模型 profile。 |
-| `ratio` | string | 否 | `request.aspectRatio` | 首尾帧模式为 `adaptive`，其余默认 `16:9`。 |
+| `ratio` | string | 否 | `request.aspectRatio` | 只有首尾帧、没有其他参考图时为 `adaptive`；首尾帧混用参考图时用请求比例，未传则为 `adaptive`；其余默认 `16:9`。 |
 | `aigc_watermark` | boolean | 否 | `request.watermark` | 仅开启时发送。 |
 | `generate_audio` | boolean | 否 | `request.generateAudio` | 仅开启时发送。 |
 | `seed` | integer | 否 | `providerOptions.minimax-video.seed` | 随机种子。 |
@@ -36,7 +36,7 @@
 
 - 图片最多 9 张、视频最多 3 个、音频最多 3 个。
 - 首帧和尾帧各最多 1 张；尾帧不能脱离首帧。
-- 首帧、尾帧可以与 `reference_image/subject_reference/style_reference` 同时提交；带首帧或尾帧时 `ratio` 固定为 `adaptive`。
+- 首帧、尾帧可以与 `reference_image/subject_reference/style_reference` 同时提交（H3 按 role 区分，秘塔等中转同样支持）；混用时 `ratio` 使用请求比例，避免上游按横版参考图出片。
 - duration 超出 4-30 秒直接失败，不静默裁剪。
 
 ## 中转兼容边界
@@ -182,7 +182,7 @@
             "name": "aspectRatio",
             "type": "string",
             "mapping": "ratio",
-            "description": "首尾帧模式自动使用 adaptive；其他模式使用用户比例。"
+            "description": "只有首尾帧、没有其他参考图时使用 adaptive；首尾帧混用参考图或其他模式使用请求比例。"
           },
           {
             "name": "watermark",
@@ -490,29 +490,63 @@
             "ratio": {
               "$if": {
                 "condition": {
-                  "$gt": [
+                  "$and": [
                     {
-                      "$len": {
-                        "$filter": {
-                          "from": {
-                            "$ref": "request.images"
-                          },
-                          "as": "image",
-                          "where": {
-                            "$in": [
-                              {
-                                "$ref": "image.role"
+                      "$gt": [
+                        {
+                          "$len": {
+                            "$filter": {
+                              "from": {
+                                "$ref": "request.images"
                               },
-                              [
-                                "first_frame",
-                                "last_frame"
-                              ]
-                            ]
+                              "as": "image",
+                              "where": {
+                                "$in": [
+                                  {
+                                    "$ref": "image.role"
+                                  },
+                                  [
+                                    "first_frame",
+                                    "last_frame"
+                                  ]
+                                ]
+                              }
+                            }
+                          }
+                        },
+                        0
+                      ]
+                    },
+                    {
+                      "$eq": [
+                        {
+                          "$len": {
+                            "$ref": "request.images"
+                          }
+                        },
+                        {
+                          "$len": {
+                            "$filter": {
+                              "from": {
+                                "$ref": "request.images"
+                              },
+                              "as": "image",
+                              "where": {
+                                "$in": [
+                                  {
+                                    "$ref": "image.role"
+                                  },
+                                  [
+                                    "first_frame",
+                                    "last_frame"
+                                  ]
+                                ]
+                              }
+                            }
                           }
                         }
-                      }
-                    },
-                    0
+                      ]
+                    }
                   ]
                 },
                 "then": "adaptive",
@@ -521,7 +555,38 @@
                     {
                       "$ref": "request.aspectRatio"
                     },
-                    "16:9"
+                    {
+                      "$if": {
+                        "condition": {
+                          "$gt": [
+                            {
+                              "$len": {
+                                "$filter": {
+                                  "from": {
+                                    "$ref": "request.images"
+                                  },
+                                  "as": "image",
+                                  "where": {
+                                    "$in": [
+                                      {
+                                        "$ref": "image.role"
+                                      },
+                                      [
+                                        "first_frame",
+                                        "last_frame"
+                                      ]
+                                    ]
+                                  }
+                                }
+                              }
+                            },
+                            0
+                          ]
+                        },
+                        "then": "adaptive",
+                        "else": "16:9"
+                      }
+                    }
                   ]
                 }
               }

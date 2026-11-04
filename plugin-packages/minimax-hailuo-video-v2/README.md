@@ -6,7 +6,7 @@
 
 - `duration` 支持 4-30 秒整数，默认 5 秒。
 - `resolution` 直接来自统一分辨率，不再遗漏。
-- 比例写入上游实际使用的 `ratio`；首尾帧模式强制 `adaptive`。
+- 比例写入上游实际使用的 `ratio`；只有首尾帧、没有其他参考图时使用 `adaptive`，首尾帧混用参考图时按请求比例出片（未传比例时使用 `adaptive`）。
 - `watermark` 开启时映射为 `aigc_watermark`，关闭时不发送。
 - `generateAudio` 开启时映射为 `generate_audio`，关闭时不发送。
 - prompt 只放入 text block，不再同时发送顶层 prompt。

@@ -312,7 +312,7 @@ async function normalizePersistedAsset(asset: Asset): Promise<Asset> {
     return { ...asset, coverUrl: asset.coverUrl.startsWith("data:image/") ? image.url : asset.coverUrl, data: { ...asset.data, dataUrl: image.url, storageKey: image.storageKey, bytes: image.bytes, mimeType: image.mimeType } };
 }
 
-async function generationAssetId(effectKey: string) {
+export async function generationAssetId(effectKey: string) {
     return `generation_${await sha256Hex(effectKey)}`;
 }
 

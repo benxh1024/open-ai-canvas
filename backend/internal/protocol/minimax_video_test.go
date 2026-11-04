@@ -132,7 +132,7 @@ func TestMiniMaxVideoAcceptsKeyframeWithReferenceImage(t *testing.T) {
 	}
 	first, _ := content[1].(map[string]any)
 	reference, _ := content[2].(map[string]any)
-	if first["role"] != "first_frame" || reference["role"] != "reference_image" || body["ratio"] != "adaptive" {
+	if first["role"] != "first_frame" || reference["role"] != "reference_image" || body["ratio"] != "16:9" {
 		t.Fatalf("combined keyframe request = %#v", body)
 	}
 }
