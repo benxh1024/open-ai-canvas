@@ -1,0 +1,357 @@
+---
+title: 运维与部署架构
+description: 本地开发、服务器部署、Agent、数据库迁移、更新回滚及组件拆分边界。
+---
+
+# 运维与部署架构
+
+本文说明影策当前的运行组件、依赖关系和部署边界。它面向需要部署、升级、扩容或排查 Agent 任务的维护者。
+
+## 运行组件
+
+```text
+浏览器
+  |
+  v
+web (Nginx, :3000)
+  | /api、SSE、WebSocket 反向代理
+  v
+backend (Go, :8080，仅 Compose 内网)
+  |-- PostgreSQL：业务数据、任务、Agent 状态、会话、技能、账务
+  |-- Redis：跨实例协调、限流与实时协作分发
+  |-- 本地数据目录：上传资源、临时媒体与备份相关文件
+  |-- yingce-agent：独立 Node/Pi Agent 运行时
+  |-- 外部模型渠道、对象存储、可选 whisper.cpp
+  v
+宿主机 Host Updater（仅受管 Release 部署）
+  |-- Docker Compose、备份、迁移、版本切换和回滚
+```
+
+公网只应暴露 `web` 的 HTTP/HTTPS 入口。`backend:8080`、PostgreSQL、Redis、`yingce-agent:8081` 与 Host Updater Unix Socket 均不得直接暴露到公网。
+
+## 部署模式
+
+| 模式 | 适用场景 | 入口 | 数据库与 Agent | 更新方式 |
+| --- | --- | --- | --- |
+| 宿主机开发 | 调试前后端代码 | `go run ./cmd/server` + `bun run dev` | 默认 SQLite、内嵌 Node Agent | 重启开发进程 |
+| Docker 热开发 | 在容器中调试源码 | `docker-compose.dev.yml` | 默认 SQLite、内嵌 Node Agent | Air/Vite 热更新 |
+| 本地试运行 | 验证 release 容器 | `docker-compose.local.yml` | 默认 SQLite、内嵌 Node Agent | 本地重新构建 |
+| 受管服务器 | 正式生产、需要后台更新 | `docker-compose.deploy.yml` | PostgreSQL、Redis、独立 Agent | Host Updater |
+| 源码服务器 | 部署改过的代码 | `deploy.yml + build.yml` | PostgreSQL、Redis、独立 Agent | 自行构建、备份、升级 |
+
+`docker-compose.build.yml` 不是独立编排。它只能叠加在 `docker-compose.deploy.yml` 上，为 `migrate`、`backend`、`web`、`yingce-agent` 补充本仓库源码构建规则。
+
+`docker-compose.yml`、`docker-compose.local.yml` 和 `docker-compose.dev.yml` 不应作为正式服务器部署方案：它们默认 SQLite，缺少生产所需的 PostgreSQL、Redis、独立 Agent 和受管升级流程。`docker-compose.server.yml` 是较早的手工源码编排，新部署不应选用。
+
+## 本地开发
+
+宿主机开发需要 Go、Bun、Node.js 22.19 或更高版本，以及 Agent runtime 的 npm 依赖。Windows 可以使用：
+
+```powershell
+.\scripts\start-local.ps1
+```
+
+该脚本使用 `.local/project-workbench-debug` 作为 SQLite 开发数据目录，分别启动 backend `127.0.0.1:8080` 与 Vite `localhost:3000`。
+
+### 本地使用 PostgreSQL
+
+开发 Compose 不会自动提供 PostgreSQL。推荐运行一个本机或 Docker PostgreSQL，再以环境变量启动 backend：
+
+```powershell
+Set-Location backend
+$env:CANVAS_BACKEND_ADDR = "127.0.0.1:8080"
+$env:CANVAS_BACKEND_DATA_DIR = (Resolve-Path "..\.local\project-workbench-debug").Path
+$env:CANVAS_DATABASE_DRIVER = "postgres"
+$env:DATABASE_URL = "postgresql://open_ai_canvas:password@127.0.0.1:5432/open_ai_canvas_dev?sslmode=disable"
+$env:CANVAS_AUTO_MIGRATE = "true"
+go run ./cmd/server
+```
+
+数据目录即使使用 PostgreSQL 仍然必需，因为资源文件、临时媒体和其他文件型数据不在数据库内。
+
+如果需要把已有 SQLite 数据带入 PostgreSQL，先停止写入并备份 SQLite 文件与资源目录，再使用一次性迁移工具：
+
+```bash
+SQLITE_SOURCE_PATH=/path/to/open_ai_canvas.db \
+DATABASE_URL='postgresql://user:password@host:5432/database?sslmode=disable' \
+migrate-sqlite-postgres
+```
+
+该工具只用于 SQLite 到 PostgreSQL 的数据搬迁；它不是每次启动都需要运行的数据库迁移命令。
+
+## 数据库迁移
+
+结构迁移的唯一实现是 `database.MigrateSchema`。它使用 `schema_migrations` 保存迁移版本、名称和 checksum；已记录的迁移不会再次执行，历史记录的名称或 checksum 被改动会被拒绝。
+
+```text
+空数据库
+  -> migration v1 的 AutoMigrate(Models...)
+  -> 后续版本的增量 migration
+已有数据库
+  -> 仅执行 schema_migrations 中不存在的增量 migration
+```
+
+因此新增表、列、索引或数据回填时：
+
+1. 新增或修改 model。
+2. 将新 model 加到 `database.Models()`，保证全新数据库可建表。
+3. 在 `schemaMigrations` 末尾新增一个递增版本的 migration。
+4. 不修改已经发布的 migration 或其 checksum。
+5. 为迁移补充 SQLite/PostgreSQL 覆盖测试。
+
+`CANVAS_AUTO_MIGRATE` 只控制由谁触发同一套迁移逻辑：
+
+| 值 | backend 启动行为 |
+| --- | --- |
+| 未设置或 `true` | 直接调用 `MigrateSchema`，适用于本地开发 |
+| `false` | 只调用 `RequireSchemaVersion`；数据库落后或高于程序版本时拒绝启动 |
+
+生产 `deploy.yml` 中，`migrate` 是一次性服务，执行 `migrate-schema up`。它成功退出后 backend 才启动；backend 本身固定 `CANVAS_AUTO_MIGRATE=false`。Host Updater 升级时也先以目标镜像执行该命令，再切换业务容器。
+
+`migrate-schema` 还提供 `status`、`verify` 和明确授权的资源修复子命令。它与 `cmd/server` 调用的是同一套迁移函数，区别只是生产把迁移动作从长驻业务进程拆出。
+
+## 正式服务器部署
+
+默认采用官方 Release 镜像。它要求 Linux、Docker Compose 和 systemd：
+
+```bash
+CANVAS_RELEASE=vX.Y.Z
+curl -fsSL "https://raw.githubusercontent.com/ddcat-ai/open-ai-canvas/${CANVAS_RELEASE}/scripts/install-server-image.sh" \
+  | sudo env CANVAS_IMAGE_TAG="${CANVAS_RELEASE}" REPOSITORY_REF="${CANVAS_RELEASE}" bash
+```
+
+安装脚本会生成 PostgreSQL 密码、`DATABASE_URL`、`YINGCE_AGENT_TOKEN`，拉取同一 Release 的 backend、web、Agent 镜像并固定为 GHCR digest。随后启动 PostgreSQL、Redis、migrate、yingce-agent、backend 和 web。
+
+部署完成后应在服务器 `.env` 中设置与真实域名一致的值：
+
+```dotenv
+CANVAS_CORS_ORIGINS=https://canvas.example.com
+CANVAS_PUBLIC_BASE_URL=https://canvas.example.com
+CANVAS_REGISTRATION_ENABLED=false
+```
+
+`CANVAS_PUBLIC_BASE_URL` 是后端为外部模型签发本地存储资源短期地址时使用的公网根地址，不应包含 `/api`。它不能替代 HTTPS 反向代理，也不会放宽出站 SSRF 限制。
+
+生产应由宿主机反向代理终止 TLS，并正确传递 `X-Forwarded-Proto` 与 `X-Forwarded-Host`。首次管理员注册应在受控网络完成，之后关闭公开注册。
+
+### 源码服务器部署
+
+只有确实需要运行当前修改过的源码时，才使用：
+
+```bash
+docker compose --env-file .env \
+  -f docker-compose.deploy.yml \
+  -f docker-compose.build.yml \
+  up -d --build
+```
+
+此模式仍使用 PostgreSQL、Redis、独立 Agent 和迁移服务，但没有由 Host Updater 管理的官方镜像更新链。维护者必须自行固定版本、备份、执行迁移并规划回滚。
+
+## 构建与发布自动化
+
+官方容器镜像由 GitHub Actions 构建并发布到 GHCR；本地 `docker compose ... --build` 使用相同 Dockerfile 在本机构建，不依赖 GitHub Actions。
+
+```text
+Pull Request
+  -> quality.yml：质量检查，不发布可部署镜像
+
+push main / push v* tag / 手动触发
+  -> publish-images.yml
+     -> 调用 quality.yml
+     -> 构建并推送不可变 SHA 镜像
+     -> 通过检查后推广可部署 tag
+     -> v* tag 额外创建 GitHub Release 和 Host Updater 资产
+```
+
+`quality.yml` 是可复用质量门禁，检查 Agent 域静态约束、完整后端 Go 测试、PostgreSQL/Redis 依赖测试、支付插件多架构 smoke、前端类型检查、lint、单元测试和 Chrome E2E。PR 连续推送时会取消过期检查；发布工作流调用时使用独立并发组，不会取消已经开始的发布。
+
+`publish-images.yml` 在 `main`、`v*` tag 或手动触发时运行。它构建并发布：
+
+| 镜像 | Dockerfile | 目标架构 |
+| --- | --- | --- |
+| `open-ai-canvas-web` | 根 `Dockerfile` | amd64、arm64 |
+| `open-ai-canvas-backend` | `backend/Dockerfile` | amd64、arm64，分别在原生 Runner 构建 |
+| `open-ai-canvas-yingce-agent` | `yingce-agent/Dockerfile` | amd64、arm64 |
+
+构建阶段先推送不可变 `sha-<完整提交>-<架构>` 镜像，并记录各镜像 digest。全部质量检查成功后，才创建多架构 manifest 并推广 `sha-<完整提交>`、短 SHA、`main` 上的 `latest` 或版本 tag。服务器部署最终把镜像固定为 `@sha256:...`，不长期依赖可变 tag。
+
+推送 `v*` tag 时，发布 job 还会交叉编译 `open-ai-canvas-host-updater-linux-amd64` 和 `open-ai-canvas-host-updater-linux-arm64`，生成 `SHA256SUMS`，并把它们连同 `docker-compose.deploy.yml` 上传到 GitHub Release。
+
+backend 镜像内部包含三个 Go 可执行文件：`yingce-backend`、`migrate-schema` 和 `migrate-sqlite-postgres`。前两个由长驻后端或一次性迁移容器使用；SQLite 到 PostgreSQL 迁移工具只由维护者在数据库迁移时手工调用。
+
+## Agent 运行架构
+
+画布 Agent 采用“持久化 run 串成 conversation”的模型：一条正式用户消息创建一个不可变 run；后续消息指向上一个 run 的 `parentId`，服务端继承其 `conversationId`。浏览器只订阅 run 的 SSE 事件，不驱动执行。
+
+```text
+Canvas Agent Panel
+  -> POST /api/agent/runs 或 /runs/:id/messages
+  -> Task + CloudAgentExecution + Event/Transcript/Session 持久化
+  -> Pi runtime
+  -> 模型、工具与事件 bridge
+  -> SSE /api/agent/runs/:id/events
+```
+
+同一用户、同一画布只能有一个活跃 Agent run。该限制由创建任务时的数据库画布锁执行，而不是只由前端按钮控制。不同画布可同时运行；不同账号的数据查询与画布变更始终按用户归属校验。
+
+会话目录按画布查询时，返回曾绑定该画布的会话。产品允许一个 conversation 从首页进入画布、再续接到另一个画布；续接时服务端不将旧画布节点事实当作新画布事实。因此它防止的是错误串线，不是强制“一画布一会话”。如业务需要严格隔离，必须在服务端拒绝跨 `canvasId` 续聊，而不能仅改前端筛选。
+
+### yingce-agent
+
+本地未设置 `YINGCE_AGENT_URL` 时，backend 直接启动 Node Pi runtime。生产设置：
+
+```dotenv
+YINGCE_AGENT_URL=http://yingce-agent:8081
+YINGCE_AGENT_BRIDGE_HOST=backend
+YINGCE_AGENT_TOKEN=<至少 32 字符的随机值>
+```
+
+此时 backend 为每个 run 建立带临时 token 的 `/model`、`/tool`、`/event` bridge，再把会话请求交给独立 `yingce-agent` 容器。Agent 容器只负责并发受限地启动隔离 Node runtime；它不连接数据库，不做计费、审批或画布写入。工具授权、账务、状态机和持久化仍在 Go backend。
+
+远程 `yingce-agent` 已配置时，失败不得回退到 backend 内嵌 runtime，否则同一个 Agent 步骤可能执行两次。
+
+## Skill 与长期记忆
+
+用户安装的 Skill 和 Agent 长期记忆都保存在 backend 的数据库中。创建 run 时，服务端冻结本轮可用 Skill 的版本：
+
+- `auto` Skill 进入带输入预算的目录，可被 Agent 自动发现；
+- `manual` Skill 只有被本轮固定或消息点名时可读；
+- Agent 用 `skill_search` 查找候选，再用 `skill_read_file` 按需读取 `SKILL.md` 或引用文件；
+- 读取时再次校验用户安装状态和冻结版本，避免同一 run 混读新旧 Skill；
+- 市场 Skill 只能推荐，安装必须由用户在界面确认，安装后从下一轮开始可用。
+
+这些数据属于 PostgreSQL 的业务数据，因此不能把 Agent 运行时、Skill 库或用户记忆拆到没有共享数据库且没有同步协议的独立服务中。
+
+## 音视频运行依赖
+
+### FFmpeg
+
+生产 backend 镜像已经安装 `ffmpeg` 和 `ffprobe`。`CANVAS_FFMPEG_PATH` 留空时，时间线渲染逻辑从 `PATH` 查找 ffmpeg；配置时只覆盖时间线成片渲染和短剧尾帧提取。
+
+```dotenv
+CANVAS_FFMPEG_PATH=/usr/local/bin/ffmpeg
+```
+
+用户功能包括：时间线成片渲染、短剧连续段落的尾帧提取。上传 H.265/MPEG-4 的浏览器兼容转码，以及字幕转写前的音频预处理，目前直接从 `PATH` 查找 `ffmpeg`，因此即便配置了该变量，仍应确保 backend 进程能在 `PATH` 中找到 ffmpeg。
+
+### Whisper.cpp
+
+`CANVAS_WHISPER_BASE_URL` 只服务于时间线的“字幕转写/自动字幕”：backend 先用 ffmpeg 把音视频转为 16kHz 单声道 PCM WAV，然后向 `${CANVAS_WHISPER_BASE_URL}/inference` 发送 multipart 请求，要求 `verbose_json`，将分段与 SRT 写入任务结果。
+
+```dotenv
+CANVAS_WHISPER_BASE_URL=http://127.0.0.1:8082
+```
+
+未配置时，字幕转写任务明确失败；不会影响一般画布生成、Agent 对话或 Skill 加载。whisper.cpp 可以部署在 backend 所在主机，也可作为单独内网服务，但其地址必须可被 backend 访问。
+
+## Host Updater 与回滚
+
+Host Updater 是运行在 Linux 宿主机 systemd 中的 `open-ai-canvas-host-updater`，不是容器。源码位于 `backend/cmd/host-updater` 与 `backend/internal/hostupdate`；Release 会发布 amd64 和 arm64 二进制及 `SHA256SUMS`。
+
+```text
+管理员浏览器
+  -> backend 管理 API
+  -> 带 token 的 Unix Socket
+  -> Host Updater
+  -> Docker Compose、备份、迁移和容器切换
+```
+
+业务 backend 不挂载 Docker Socket。它只通过 `/run/open-ai-canvas-updater/updater.sock` 与 updater 通信，且请求携带 `CANVAS_UPDATER_TOKEN`。
+
+更新顺序：检查 Release、下载并验证目标 Compose、预检、创建 PostgreSQL 与数据目录 ZIP 备份、拉取并验证镜像 digest、停止 web/backend、运行目标 `migrate-schema up`、更新 `.env` 的版本与 immutable image digest、启动目标服务并检查稳定窗口。状态和日志写入 `/var/lib/open-ai-canvas-updater/state.json`。
+
+迁移、启动或健康检查失败时会自动回滚：恢复旧 Compose 与 `.env`、验证备份、用 `pg_restore` 恢复 PostgreSQL、恢复数据目录、启动旧服务并再次验收。管理员可手动发起回滚，但必须同时存在上一版本与已验证备份；Updater 在运行中意外退出会进入 `manual_intervention`，不伪造成功。
+
+Host Updater 仅适用于官方 Release 镜像部署。源码构建服务器不能将其当作更新方案。
+
+### 官方 Release 升级步骤
+
+升级前登录服务器确认服务、更新器和磁盘空间正常：
+
+```bash
+cd /opt/open-ai-canvas
+sudo docker compose --env-file .env -f docker-compose.deploy.yml ps
+sudo systemctl status open-ai-canvas-updater
+sudo df -h
+```
+
+确认没有必须立即完成的大型生成任务后，以管理员身份进入“系统配置 -> 系统更新”：先执行“检查更新”，核对 Release 说明，再开始更新。Updater 只接受刚刚检查到的目标版本，不能任意输入镜像 tag。
+
+升级期间可观察：
+
+```bash
+sudo journalctl -u open-ai-canvas-updater -f
+sudo docker compose --env-file .env -f docker-compose.deploy.yml ps
+```
+
+升级完成后，除健康检查外还应实际验证登录、画布保存、资源访问、普通生成任务、Agent 对话及 SSE 事件流。Host Updater 会在迁移、启动或健康检查失败时自动回滚；手动回滚必须填写原因，且只能回到最近一次升级前、存在已验证备份的版本，不能直接任选历史 Release 降级。
+
+### 为既有 Release 部署补装 Updater
+
+仅当现有部署已经使用官方 Release 镜像、`docker-compose.deploy.yml`，且 `.env` 中 backend 和 web 镜像已固定为 GHCR digest 时，可补装：
+
+```bash
+cd /opt/open-ai-canvas
+curl -fsSL https://raw.githubusercontent.com/ddcat-ai/open-ai-canvas/main/scripts/install-host-updater.sh | sudo bash
+sudo docker compose --env-file .env -f docker-compose.deploy.yml \
+  up -d --no-deps --force-recreate backend
+```
+
+补装后通过后台检查更新。若部署来自自建源码、旧 SQLite 或自定义 Compose，先完成备份、数据库迁移和部署核对，不要直接安装更新器后尝试接管。
+
+### 源码部署升级步骤
+
+源码部署不由 Host Updater 保障。先自行备份 PostgreSQL、backend 数据目录、`.env` 和 Compose 文件；确认 Git 工作区没有未提交修改后，在安装目录运行：
+
+```bash
+cd /opt/open-ai-canvas
+sudo env REPOSITORY_REF=main bash scripts/install-server.sh
+```
+
+脚本会执行 `git pull --ff-only`、构建 `migrate`/backend/web/Agent 镜像，并启动 `deploy.yml + build.yml`。使用自定义分支或受控 tag 时，将 `REPOSITORY_REF=main` 替换为实际引用。若升级或 schema 迁移失败，恢复升级前备份；不得仅切回旧 backend 镜像。
+
+## 组件拆分边界
+
+| 组件 | 可否独立部署 | 前提与边界 |
+| --- | --- | --- |
+| web | 可以 | 静态 Nginx 可独立扩展；必须把 `/api`、SSE 和 WebSocket 代理到 backend |
+| backend | 可以横向扩展 | 多实例需共享 PostgreSQL、共享资源存储，并配置 Redis；不得暴露 8080 到公网 |
+| PostgreSQL | 可以托管或独立 | 是业务事实源；必须备份、监控连接数和磁盘，升级前保持可恢复 |
+| Redis | 可以托管或独立 | 用于跨实例协调与实时分发；无 Redis 时仅支持单 backend 的本地协调语义 |
+| yingce-agent | 可以独立扩展 | 需和 backend 网络互通，并由共享 token 鉴权；只能回调 backend 临时 bridge，不能直接访问数据库 |
+| whisper.cpp | 可以独立部署 | 仅转写功能依赖；backend 必须能访问其 `/inference`，应限制到内网 |
+| 对象存储 | 可以外置 | 必须保留资源归属、签名 URL 与删除引用检查合同 |
+| Host Updater | 不能容器化替代 | 需要宿主机 Docker、systemd、备份目录和 Unix Socket 权限 |
+
+不要将单独的 Agent 容器、数据库或 Redis 暴露在公网；也不要通过“远程 Agent 不可达时回退内嵌执行”实现高可用。正确策略是健康检查、容量规划、重试和明确失败，避免重复执行工具或收费步骤。
+
+## 运维检查清单
+
+部署前：
+
+- 固定同一 Release 的 backend、web、yingce-agent 镜像与 Compose 文件。
+- 设置生产 CORS、HTTPS、公开基础地址，关闭公开注册。
+- 确认 PostgreSQL 备份和恢复演练，限制 `.env`、数据目录与备份文件权限。
+- 不暴露 backend、PostgreSQL、Redis、Agent 与 updater Socket。
+- 若需参考媒体生成，验证外部模型能访问 `CANVAS_PUBLIC_BASE_URL` 签发的真实资源 URL。
+
+运行中：
+
+- 检查 web、backend、PostgreSQL、Redis、yingce-agent 健康状态。
+- 验证登录、SSE 断线重连、任务生成、资源读取和 Agent 审批，而不仅是 `/health`。
+- 监控 Agent active/queued 数、backend worker 并发、PostgreSQL 空间与备份空间。
+- 修改 `YINGCE_AGENT_MAX_SESSIONS`、`YINGCE_AGENT_NODE_MEMORY_MB` 或运行时策略后，确认实际运行值已生效。
+
+升级与回退：
+
+- 受管部署从后台检查并发起更新，或检查 `open-ai-canvas-updater.service` 日志和状态文件。
+- 源码部署先自行创建 PostgreSQL 与数据目录备份，再执行目标 `migrate-schema up`；升级失败时恢复匹配版本的数据库备份，不能只切回旧 backend 镜像。
+- SQLite 迁往 PostgreSQL 前停止写入、备份并验证迁移结果；不要直接覆盖旧 Compose 或数据卷。
+
+## 相关文档
+
+- [本地开发](./local-development)
+- [数据库结构与迁移](./backend-database)
+- [在线更新与安全回退](./system-update)
+- [Agent 提示词策略](./agent-prompt-policy)
+- [HTTP API](./http-api)
