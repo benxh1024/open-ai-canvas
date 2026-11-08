@@ -116,7 +116,7 @@ migrate-sqlite-postgres
 
 ```bash
 CANVAS_RELEASE=vX.Y.Z
-curl -fsSL "https://raw.githubusercontent.com/ddcat-ai/open-ai-canvas/${CANVAS_RELEASE}/scripts/install-server-image.sh" \
+curl -fsSL "https://raw.githubusercontent.com/benxh1024/open-ai-canvas/${CANVAS_RELEASE}/scripts/install-server-image.sh" \
   | sudo env CANVAS_IMAGE_TAG="${CANVAS_RELEASE}" REPOSITORY_REF="${CANVAS_RELEASE}" bash
 ```
 
@@ -292,7 +292,7 @@ sudo docker compose --env-file .env -f docker-compose.deploy.yml ps
 
 ```bash
 cd /opt/open-ai-canvas
-curl -fsSL https://raw.githubusercontent.com/ddcat-ai/open-ai-canvas/main/scripts/install-host-updater.sh | sudo bash
+curl -fsSL https://raw.githubusercontent.com/benxh1024/open-ai-canvas/main/scripts/install-host-updater.sh | sudo bash
 sudo docker compose --env-file .env -f docker-compose.deploy.yml \
   up -d --no-deps --force-recreate backend
 ```

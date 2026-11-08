@@ -16,7 +16,7 @@ import "./welcome.css";
 import { Select } from "@/components/ui/base/select";
 
 const StoryReel = lazy(() => import("./story-reel"));
-const github = "https://github.com/ddcat-ai/open-ai-canvas";
+const github = "https://github.com/benxh1024/open-ai-canvas";
 
 export default function WelcomePage() {
     const [look, setLook] = useState(getWelcomeLook);

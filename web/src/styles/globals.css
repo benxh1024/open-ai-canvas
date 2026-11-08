@@ -9,7 +9,7 @@
 
 /* =========================================================================
    Design Token System — 三层架构 (Primitive → Semantic → Component)
-   详见 Wayfinder #96: https://github.com/ddcat-ai/open-ai-canvas/issues/96
+   详见 Wayfinder #96: https://github.com/benxh1024/open-ai-canvas/issues/96
    规范：禁止在组件中新增裸 text-[Npx]/rounded-[Npx]/z-[N]，必须使用 token
    ========================================================================= */
 
