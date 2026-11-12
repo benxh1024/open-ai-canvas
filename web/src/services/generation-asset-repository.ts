@@ -59,7 +59,12 @@ function runWithBrowserStorageLock<T>(scope: string, operation: () => Promise<T>
  */
 export function withGenerationAssetStorageLock<T>(scope: string, operation: () => Promise<T>, options: GenerationStorageLockOptions = {}): Promise<T> {
     const previous = assetStorageTails.get(scope) ?? Promise.resolve();
-    const pending = previous.then(() => undefined, () => undefined).then(() => runWithBrowserStorageLock(scope, operation, options));
+    const pending = previous
+        .then(
+            () => undefined,
+            () => undefined,
+        )
+        .then(() => runWithBrowserStorageLock(scope, operation, options));
     const tail = pending.then(
         () => undefined,
         () => undefined,
@@ -74,7 +79,10 @@ export function withGenerationAssetStorageLock<T>(scope: string, operation: () =
 export function withGenerationArtifactCommitLock<T>(scope: string, operation: () => Promise<T>, options: GenerationStorageLockOptions = {}): Promise<T> {
     const previous = artifactCommitTails.get(scope) ?? Promise.resolve();
     const pending = previous
-        .then(() => undefined, () => undefined)
+        .then(
+            () => undefined,
+            () => undefined,
+        )
         .then(() =>
             withBrowserStorageLock(`${ARTIFACT_COMMIT_LOCK_PREFIX}${scope}`, operation, {
                 requireCrossTabLock: options.requireCrossRealmLock,

@@ -376,7 +376,11 @@ test("browser generation asset writes use a localStorage lease when Web Locks is
         await pending;
 
         assert.equal(entered, true);
-        assert.equal(writes.some((key) => key.startsWith("yingce:cross-tab-storage-lock:v1:")), true, "the fallback must publish a cross-tab lease");
+        assert.equal(
+            writes.some((key) => key.startsWith("yingce:cross-tab-storage-lock:v1:")),
+            true,
+            "the fallback must publish a cross-tab lease",
+        );
     } finally {
         if (originalWindow === undefined) delete (globalThis as { window?: unknown }).window;
         else Object.defineProperty(globalThis, "window", { configurable: true, value: originalWindow });
