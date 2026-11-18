@@ -392,6 +392,7 @@ export type RuntimeResourcePolicy = {
     dailyUploadMB: number;
     storedFileGB: number;
     structuredDataMB: number;
+    agentHistoryMB: number;
     taskDataGB: number;
     assetCount: number;
     canvasCount: number;
@@ -616,6 +617,10 @@ export function getAdminReferences() {
 
 export function getAdminUserDetail(id: string) {
     return http.get<AdminUserDetail>(`/admin/users/${encodeURIComponent(id)}/detail`);
+}
+
+export function clearAdminUserAgentHistory(id: string) {
+    return http.delete<{ freedBytes: number }>(`/admin/users/${encodeURIComponent(id)}/agent-history`);
 }
 
 export function listAdminUserLedger(id: string, params: { page?: number; pageSize?: number; type?: string } = {}) {
